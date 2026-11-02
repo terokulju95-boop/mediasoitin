@@ -33,6 +33,8 @@ jobs:
       - name: Rakenna Mediasoitin.exe
         run: >
           pyinstaller --noconfirm --windowed --name Mediasoitin
+          --icon soitin/assets/mediasoitin.ico
+          --add-data "soitin/assets;soitin/assets"
           --add-binary "libmpv-2.dll;."
           mediasoitin.py
 
