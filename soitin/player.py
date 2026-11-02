@@ -53,7 +53,7 @@ WATCHED = [
     "audio-exclusive", "hwdec-current",
 ]
 
-KEYS = ["MBTN_LEFT_DBL", "SPACE", "f", "F", "ESC", "RIGHT", "LEFT", "UP", "DOWN",
+KEYS = ["MBTN_LEFT", "MBTN_LEFT_DBL", "SPACE", "f", "F", "ESC", "RIGHT", "LEFT", "UP", "DOWN",
         "m", "n", "p", "PGUP", "PGDWN", "WHEEL_UP", "WHEEL_DOWN", "MBTN_RIGHT"]
 
 
@@ -64,7 +64,7 @@ class MpvWidget(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DontCreateNativeAncestors)
         self.setAttribute(Qt.WA_NativeWindow)
-        self.setStyleSheet("background:black;")
+        self.setStyleSheet("background:#000000;")
         self.setMinimumSize(320, 180)
         self.signals = MpvSignals()
 

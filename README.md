@@ -15,7 +15,10 @@ Toistomoottorina on **mpv (libmpv + FFmpeg)**, joten käytännössä kaikki tied
 - **Bit-perfect-ääni** (WASAPI exclusive): ääni menee äänikortille/DAC:lle täsmälleen sellaisenaan. Tilarivin merkkivalo kertoo, onko ääni bit-perfect, ja jos ei ole, miksi.
 - **Saumaton toisto** (gapless) albumeille ja live-levyille.
 - **Paras kuvanlaatu.** Käytössä on mpv:n *high-quality*-profiili ja laitteistopurku, joka ei heikennä kuvaa.
-- Soittolista (sekoitus, toisto, järjestely), ääniraidan ja tekstityksen valinta, äänilaitteen valinta, koko näyttö sekä raahaa ja pudota.
+- **Selkeä musta OLED-teema** korostusvärillä (oletus tumma oranssi). Värin voi vaihtaa sovelluksessa.
+- **Muokattava näkymä:** lähteet, soittolista ja tilarivi voi näyttää tai piilottaa, ja paneelien koon voi säätää vetämällä. Asetukset muistetaan.
+- **Koko näyttö ilman häiriöitä:** palkit katoavat, kun hiiri on paikallaan, ja tulevat esiin, kun hiirtä liikuttaa.
+- Soittolista (sekoitus, toisto, järjestely), ääniraidan ja tekstityksen valinta, äänilaitteen valinta sekä raahaa ja pudota.
 
 ## Lataus ja asennus (helpoin tapa)
 
@@ -28,21 +31,30 @@ Asennusta ei tarvita. Jos haluat avata tiedostot aina tällä soittimella, valit
 
 ## Käyttö
 
+Näytöllä on vain olennainen: lähteet ja tiedostot vasemmalla, video keskellä, soittolista oikealla ja ohjaimet alhaalla. Kaikki muut toiminnot löytyvät yläreunan valikoista. Koko valikon saa auki myös hiiren oikealla painikkeella videon päältä.
+
 | Toiminto | Miten |
 |---|---|
+| Tauko / jatka | **Klikkaa videota**, tai välilyönti |
+| Koko näyttö | **Tuplaklikkaa videota**, tai F / F11. Esc palaa. |
+| Valikko koko näytöllä | Liikuta hiirtä ja paina ☰ vasemmasta yläkulmasta, tai klikkaa hiiren oikealla |
 | Toista tiedosto | Tuplaklikkaa tiedostoa. Saman kansion muut kappaleet tulevat jonoon. |
-| Toista CD tai DVD | Tuplaklikkaa levyä asemaluettelossa, tai *Tiedosto → Toista levy*. |
-| Toista koko kansio | ▶-painike polun vieressä, tai hiiren oikea → *Toista kansio* |
-| Koko näyttö | Tuplaklikkaa videota tai paina F. Esc palaa. |
-| Toista/tauko | Välilyönti, tai hiiren oikea videon päällä |
+| Toista CD tai DVD | Tuplaklikkaa levyä Lähteet-luettelossa, tai *Tiedosto → Toista levy* |
 | Kelaus | Videon päällä ← → (5 s), muualla Shift + ← → (10 s) |
 | Äänenvoimakkuus | Videon päällä ↑ ↓ tai hiiren rulla, muualla Ctrl + ↑ ↓ |
-| Seuraava/edellinen | Ctrl + → / Ctrl + ←, tai mediapainikkeet |
-| Tiedoston tekniset tiedot | Ctrl + I |
+| Seuraava / edellinen | Ctrl + → / Ctrl + ←, tai mediapainikkeet |
+| Soittolistan muokkaus | Hiiren oikea soittolistassa, tai *Soittolista*-valikko |
+
+### Näkymän muokkaus
+
+- **Näytä → Lähteet ja tiedostot** (Ctrl + 1) ja **Näytä → Soittolista** (Ctrl + 2) näyttävät ja piilottavat paneelit.
+- **Näytä → Vain video** (Ctrl + 0) piilottaa molemmat paneelit kerralla.
+- **Näytä → Korostusväri** vaihtaa teeman värin. Valittavana on valmiita värejä tai oma värisi.
+- Paneelien rajoja voi vetää hiirellä. Soitin muistaa koon, paikan ja valinnat seuraavalla kerralla.
 
 ### Bit-perfect-ääni
 
-Laita **Bit-perfect** päälle ohjainpalkista (tai *Ääni → Bit-perfect*). Silloin:
+Laita päälle valikosta *Ääni → Bit-perfect*. Silloin:
 
 - Windows ei miksaa eikä muunna ääntä, ja esim. 96 kHz / 24-bit FLAC menee DAC:lle sellaisenaan.
 - Muiden ohjelmien äänet eivät kuulu sillä aikaa.
@@ -77,7 +89,9 @@ GitHub Actions rakentaa `.exe`:n automaattisesti (`.github/workflows/build.yml`)
 
 ```
 mediasoitin.py          käynnistys
-soitin/app.py           pääikkuna: selain, soittolista, ohjaimet
+soitin/app.py           pääikkuna: selain, soittolista, ohjaimet, koko näyttö
+soitin/theme.py         värit ja tyylit (helppo muokata)
+soitin/icons.py         piirretyt kuvakkeet
 soitin/player.py        mpv-moottori upotettuna ikkunaan, laatuasetukset
 soitin/cdaudio.py       musiikki-CD:n suora digitaalinen luku (Windows)
 soitin/drives.py        asemien tunnistus (kiintolevy, USB, CD/DVD)
