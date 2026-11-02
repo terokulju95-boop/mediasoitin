@@ -3,13 +3,12 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QKeySequence, QShortcut
+from PySide6.QtCore import QDir, QEvent, QObject, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QKeySequence
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QColorDialog, QFileDialog, QFileSystemModel,
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QSlider, QSplitter, QStyle, QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QSlider, QSplitter,
+    QStyle, QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import __version__, cdaudio, theme
@@ -18,10 +17,23 @@ from .icons import icon
 from .media import (NAME_FILTERS, cda_track_number, describe_format, display_name,
                     fmt_time, media_in_folder, natural_key)
 from .player import MpvWidget
+from .settings import ACTIONS, Config, SettingsDialog
 
 IS_WIN = sys.platform == "win32"
-HIDE_DELAY_MS = 2500      # koko näytön palkit piiloon, kun hiiri on paikallaan
-CLICK_DELAY_MS = 230      # odotetaan hetki, ettei tuplaklikkaus laukaise taukoa
+NAV_KEYS = {Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp,
+            Qt.Key_PageDown, Qt.Key_Home, Qt.Key_End}
+
+
+class NavKeyFilter(QObject):
+    """Kun tiedosto- tai soittolista on valittuna, nuolinäppäimet liikkuvat listassa
+    eivätkä kelaa. Muualla (esim. videon päällä) ne toimivat pikanäppäiminä."""
+
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.ShortcutOverride and isinstance(obj, QAbstractItemView):
+            if e.key() in NAV_KEYS and not (e.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier | Qt.AltModifier)):
+                e.accept()
+                return True
+        return False
 
 
 class SeekSlider(QSlider):
@@ -54,63 +66,69 @@ class SeekSlider(QSlider):
 
 
 class Overlay(QWidget):
-    """Koko näytön tilassa videon päälle ilmestyvä palkki."""
+    """Koko näytön tilassa videon päälle ilmestyvä palkki (videon lapsi-widget)."""
 
     def __init__(self, parent):
-        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground)
         self.setObjectName("overlay")
-        self.setWindowOpacity(0.92)
+        self.setMouseTracking(True)
         self.lay = QHBoxLayout(self)
-        self.lay.setContentsMargins(8, 4, 8, 4)
+        self.lay.setContentsMargins(10, 6, 10, 6)
+        self.hide()
 
 
 class MainWindow(QMainWindow):
     def __init__(self, files=None):
         super().__init__()
-        self.settings = QSettings("Mediasoitin", "Mediasoitin")
-        self.accent = self.settings.value("accent", theme.DEFAULT_ACCENT, type=str)
-        self.state = {}             # mpv:n viimeisimmät ominaisuusarvot
+        self.cfg = Config()
+        self.settings = self.cfg.qs          # ikkunan koko, paneelit ym.
+        self.accent = self.cfg.get("accent")
+        self.state = {}                      # mpv:n viimeisimmät ominaisuusarvot
         self.playlist = []
         self.pending_chapter = None
         self.fullscreen = False
         self._drive_sig = None
-        self._last_click_pause = 0.0
-        self._press_time = 0.0
-        self._last_dbl = 0.0
+        self._click_time = 0.0
+        self._auto_fs_done = False
         self._last_cursor = None
 
         self.setWindowTitle("Mediasoitin")
         self.resize(1280, 760)
         self.setAcceptDrops(True)
 
-        exclusive = self.settings.value("exclusive", False, type=bool)
-        volume = self.settings.value("volume", 100, type=int)
-        self.video = MpvWidget(exclusive=exclusive, volume=volume)
+        volume = self.settings.value("volume", 100, type=int) if self.cfg.get("remember_volume") else 100
+        self.video = MpvWidget(options=self._mpv_options(volume))
+        self.video.accent = QColor(self.accent)
         dev = self.settings.value("audio_device", "", type=str)
         if dev:
             self.video.set("audio-device", dev)
+        quality = self.cfg.get("quality")
+        if quality in ("high-quality", "fast"):
+            self.video.cmd("apply-profile", quality)
 
         self._build_ui()
+        self._build_actions()
         self._build_menus()
-        self._build_shortcuts()
         self._build_fullscreen()
         self.refresh_icons()
+        self.nav_filter = NavKeyFilter(self)
+        QApplication.instance().installEventFilter(self.nav_filter)
 
         sig = self.video.signals
         sig.prop.connect(self.on_prop)
         sig.end_file.connect(self.on_end_file)
         sig.file_loaded.connect(self.on_file_loaded)
-        sig.key.connect(self.on_video_key)
-
-        self.click_timer = QTimer(self, singleShot=True, interval=CLICK_DELAY_MS,
-                                  timeout=self._single_click)
+        self.video.clicked.connect(self.on_video_click)
+        self.video.double_clicked.connect(self.on_video_double_click)
+        self.video.right_clicked.connect(self.show_main_menu)
+        self.video.wheel.connect(self.on_video_wheel)
+        self.video.mouse_moved.connect(self.on_mouse_activity)
 
         self.refresh_drives()
         self.drive_timer = QTimer(self, interval=3000, timeout=self.refresh_drives)
         self.drive_timer.start()
-        QTimer.singleShot(300, self.show_idle)
+        QTimer.singleShot(100, self.show_idle)
 
         geo = self.settings.value("geometry")
         if geo is not None:
@@ -128,7 +146,55 @@ class MainWindow(QMainWindow):
             self.browse(start)
 
         if files:
-            QTimer.singleShot(200, lambda: self.add_paths(files, play=True))
+            QTimer.singleShot(300, lambda: self.add_paths(files, play=True))
+
+    def _mpv_options(self, volume):
+        c = self.cfg
+        opts = dict(
+            volume=volume,
+            hwdec="auto-safe" if c.get("hwdec") else "no",
+            alang=c.get("alang"), slang=c.get("slang"),
+            sub_auto="fuzzy" if c.get("sub_auto") else "no",
+            sub_scale=c.get("sub_scale"),
+            resume_playback="yes" if c.get("resume") else "no",
+        )
+        if IS_WIN:
+            opts["audio_exclusive"] = "yes" if c.get("exclusive") else "no"
+        return opts
+
+    def apply_settings(self):
+        """Ota asetusikkunan muutokset käyttöön heti."""
+        c = self.cfg
+        v = self.video
+        v.set("hwdec", "auto-safe" if c.get("hwdec") else "no")
+        v.set("alang", c.get("alang"))
+        v.set("slang", c.get("slang"))
+        v.set("sub-auto", "fuzzy" if c.get("sub_auto") else "no")
+        v.set("sub-scale", c.get("sub_scale"))
+        v.set("resume-playback", "yes" if c.get("resume") else "no")
+        if IS_WIN and (self.state.get("audio-exclusive") in (True, "yes")) != c.get("exclusive"):
+            v.set_exclusive(c.get("exclusive"))
+        self.excl_action.blockSignals(True)
+        self.excl_action.setChecked(c.get("exclusive"))
+        self.excl_action.blockSignals(False)
+        self.hide_timer.setInterval(int(c.get("hide_delay") * 1000))
+        for aid, act in self.act.items():
+            act.setShortcut(QKeySequence(c.key(aid)))
+        self.update_seek_labels()
+        if c.get("accent") != self.accent:
+            self.set_accent(c.get("accent"))
+        if self.state.get("idle-active", True):
+            self.show_idle()
+        self.update_audio_info()
+
+    def open_settings(self):
+        old_quality = self.cfg.get("quality")
+        dlg = SettingsDialog(self.cfg, self)
+        if dlg.exec():
+            self.apply_settings()
+            if self.cfg.get("quality") != old_quality:
+                QMessageBox.information(self, "Asetukset",
+                                        "Kuvanlaadun muutos tulee voimaan, kun soitin käynnistetään uudelleen.")
 
     # ================================================================ UI
     def _panel_title(self, text):
@@ -139,6 +205,7 @@ class MainWindow(QMainWindow):
     def _button(self, tip, slot, name=None):
         b = QToolButton(toolTip=tip)
         b.setCursor(Qt.PointingHandCursor)
+        b.setFocusPolicy(Qt.NoFocus)   # välilyönti ja nuolet eivät jää painikkeisiin
         b.clicked.connect(slot)
         if name:
             b.setObjectName(name)
@@ -243,6 +310,7 @@ class MainWindow(QMainWindow):
         self.dur_label = QLabel("0:00")
         self.dur_label.setObjectName("timeLabel")
         self.seek_slider = SeekSlider()
+        self.seek_slider.setFocusPolicy(Qt.NoFocus)
         self.seek_slider.seek.connect(lambda s: self.video.cmd("seek", s, "absolute+exact"))
         self.seek_slider.valueChanged.connect(
             lambda v: self.seek_slider.dragging and self.pos_label.setText(fmt_time(v / 1000)))
@@ -250,6 +318,7 @@ class MainWindow(QMainWindow):
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setFixedWidth(100)
+        self.vol_slider.setFocusPolicy(Qt.NoFocus)
         self.vol_slider.setCursor(Qt.PointingHandCursor)
         self.vol_slider.setValue(self.settings.value("volume", 100, type=int))
         self.vol_slider.valueChanged.connect(lambda v: self.video.set("volume", float(v)))
@@ -289,34 +358,86 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.format_label, 1)
         self.statusBar().addPermanentWidget(self.bp_label)
 
+    def _build_actions(self):
+        """Kaikki toiminnot, joille voi asettaa pikanäppäimen (Asetukset → Pikanäppäimet)."""
+        v = self.video
+        slots = {
+            "play_pause": self.toggle_pause, "stop": self.stop, "next": self.next, "prev": self.prev,
+            "seek_fwd": lambda: v.cmd("seek", self.cfg.get("seek_short"), "relative+exact"),
+            "seek_back": lambda: v.cmd("seek", -self.cfg.get("seek_short"), "relative+exact"),
+            "seek_fwd_long": lambda: v.cmd("seek", self.cfg.get("seek_long"), "relative+exact"),
+            "seek_back_long": lambda: v.cmd("seek", -self.cfg.get("seek_long"), "relative+exact"),
+            "next_chapter": lambda: v.cmd("add", "chapter", 1),
+            "prev_chapter": lambda: v.cmd("add", "chapter", -1),
+            "frame_step": lambda: v.cmd("frame-step"),
+            "frame_back": lambda: v.cmd("frame-back-step"),
+            "speed_up": lambda: v.cmd("multiply", "speed", 1.1),
+            "speed_down": lambda: v.cmd("multiply", "speed", 1 / 1.1),
+            "speed_reset": lambda: v.set("speed", 1.0),
+            "vol_up": lambda: v.cmd("add", "volume", self.cfg.get("volume_step")),
+            "vol_down": lambda: v.cmd("add", "volume", -self.cfg.get("volume_step")),
+            "mute": lambda: v.cmd("cycle", "mute"),
+            "audio_cycle": lambda: v.cmd("cycle", "audio"),
+            "sub_cycle": lambda: v.cmd("cycle", "sub"),
+            "sub_toggle": lambda: v.cmd("cycle", "sub-visibility"),
+            "fullscreen": self.toggle_fullscreen, "fullscreen_alt": self.toggle_fullscreen,
+            "exit_fullscreen": lambda: self.fullscreen and self.toggle_fullscreen(),
+            "toggle_library": lambda: self.lib_action.toggle(),
+            "toggle_playlist": lambda: self.pl_action.toggle(),
+            "video_only": self.video_only, "file_info": self.show_file_info,
+            "open_files": self.open_files_dialog, "open_folder": self.open_folder_dialog,
+            "remove_selected": self.remove_selected, "settings": self.open_settings,
+            "quit": self.close,
+        }
+        self.act = {}
+        for aid, label, _default, _group in ACTIONS:
+            a = QAction(label, self)
+            a.setShortcut(QKeySequence(self.cfg.key(aid)))
+            a.setShortcutContext(Qt.WindowShortcut)
+            a.triggered.connect(slots[aid])
+            self.addAction(a)       # toimii myös kun valikkorivi on piilossa
+            self.act[aid] = a
+        self.update_seek_labels()
+
+    def update_seek_labels(self):
+        s, l = self.cfg.get("seek_short"), self.cfg.get("seek_long")
+        self.act["seek_fwd"].setText(f"Kelaa eteen {s} s")
+        self.act["seek_back"].setText(f"Kelaa taakse {s} s")
+        self.act["seek_fwd_long"].setText(f"Kelaa eteen {l} s")
+        self.act["seek_back_long"].setText(f"Kelaa taakse {l} s")
+
     def _build_menus(self):
         mb = self.menuBar()
+        A = self.act
 
         # Tiedosto
         m = mb.addMenu("&Tiedosto")
-        m.addAction("Avaa tiedostoja…", QKeySequence.Open, self.open_files_dialog)
-        m.addAction("Avaa kansio…", QKeySequence("Ctrl+Shift+O"), self.open_folder_dialog)
+        m.addAction(A["open_files"])
+        m.addAction(A["open_folder"])
         self.disc_menu = m.addMenu("Toista levy (CD / DVD)")
         self.disc_menu.aboutToShow.connect(self.fill_disc_menu)
         m.addAction("Toista nykyinen kansio", lambda: self.play_folder(self.current_dir, True))
         m.addSeparator()
-        m.addAction("Lopeta", QKeySequence.Quit, self.close)
+        m.addAction(A["settings"])
+        m.addSeparator()
+        m.addAction(A["quit"])
 
         # Toisto
         m = mb.addMenu("T&oisto")
-        m.addAction("Toista / tauko", self.toggle_pause)
-        m.addAction("Pysäytä", self.stop)
-        m.addAction("Edellinen", QKeySequence("Ctrl+Left"), self.prev)
-        m.addAction("Seuraava", QKeySequence("Ctrl+Right"), self.next)
+        for k in ("play_pause", "stop", "prev", "next"):
+            m.addAction(A[k])
         m.addSeparator()
-        m.addAction("Kelaa eteen 10 s", QKeySequence("Shift+Right"), lambda: self.video.cmd("seek", 10))
-        m.addAction("Kelaa taakse 10 s", QKeySequence("Shift+Left"), lambda: self.video.cmd("seek", -10))
+        for k in ("seek_fwd", "seek_back", "seek_fwd_long", "seek_back_long"):
+            m.addAction(A[k])
         m.addSeparator()
         self.chapter_menu = m.addMenu("Kappale / luku")
         self.chapter_menu.setEnabled(False)
-        self.audio_menu = m.addMenu("Ääniraita")
-        self.sub_menu = m.addMenu("Tekstitys")
-        m.addAction("Lataa tekstitystiedosto…", self.load_subtitle)
+        speed = m.addMenu("Nopeus")
+        for k in ("speed_up", "speed_down", "speed_reset"):
+            speed.addAction(A[k])
+        frame = m.addMenu("Ruutu kerrallaan")
+        frame.addAction(A["frame_step"])
+        frame.addAction(A["frame_back"])
 
         # Soittolista
         m = mb.addMenu("&Soittolista")
@@ -325,7 +446,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("Siirrä valitut ylös", QKeySequence("Alt+Up"), lambda: self.move_selected(-1))
         m.addAction("Siirrä valitut alas", QKeySequence("Alt+Down"), lambda: self.move_selected(1))
-        m.addAction("Poista valitut", self.remove_selected)
+        m.addAction(A["remove_selected"])
         m.addSeparator()
         m.addAction("Sekoita", lambda: self.video.cmd("playlist-shuffle"))
         m.addAction("Järjestä aakkosjärjestykseen", self.sort_playlist)
@@ -345,27 +466,34 @@ class MainWindow(QMainWindow):
         # Ääni
         m = mb.addMenu("Ää&ni")
         self.excl_action = QAction("Bit-perfect (WASAPI exclusive)", self, checkable=True)
-        self.excl_action.setChecked(self.settings.value("exclusive", False, type=bool))
+        self.excl_action.setChecked(self.cfg.get("exclusive"))
         self.excl_action.toggled.connect(self.set_exclusive)
         self.excl_action.setEnabled(IS_WIN)
-        self.excl_action.setToolTip("Ääni äänikortille muuttamattomana. Windowsin äänenvoimakkuus ei "
-                                    "vaikuta – pidä soittimen voimakkuus 100 %:ssa ja säädä vahvistimesta.")
         m.addAction(self.excl_action)
-        m.setToolTipsVisible(True)
         self.device_menu = m.addMenu("Äänilaite")
         self.device_menu.aboutToShow.connect(self.fill_device_menu)
+        self.audio_menu = m.addMenu("Ääniraita")
         m.addSeparator()
-        m.addAction("Mykistä", QKeySequence("M"), lambda: self.video.cmd("cycle", "mute"))
-        m.addAction("Voimakkaammin", QKeySequence("Ctrl+Up"), lambda: self.video.cmd("add", "volume", 5))
-        m.addAction("Hiljemmin", QKeySequence("Ctrl+Down"), lambda: self.video.cmd("add", "volume", -5))
+        for k in ("mute", "vol_up", "vol_down"):
+            m.addAction(A[k])
+
+        # Tekstitys
+        m = mb.addMenu("Te&kstitys")
+        self.sub_menu = m.addMenu("Valitse tekstitys")
+        m.addAction(A["sub_toggle"])
+        m.addAction(A["sub_cycle"])
+        m.addAction("Lataa tekstitystiedosto…", self.load_subtitle)
+        m.addSeparator()
+        m.addAction("Suurempi teksti", lambda: self.video.cmd("add", "sub-scale", 0.1))
+        m.addAction("Pienempi teksti", lambda: self.video.cmd("add", "sub-scale", -0.1))
 
         # Näytä
         m = mb.addMenu("&Näytä")
-        self.lib_action = m.addAction("Lähteet ja tiedostot", QKeySequence("Ctrl+1"))
+        self.lib_action = m.addAction("Lähteet ja tiedostot")
         self.lib_action.setCheckable(True)
         self.lib_action.setChecked(self.settings.value("show_library", True, type=bool))
         self.lib_action.toggled.connect(lambda on: self._toggle_panel(self.library_panel, "show_library", on))
-        self.pl_action = m.addAction("Soittolista", QKeySequence("Ctrl+2"))
+        self.pl_action = m.addAction("Soittolista")
         self.pl_action.setCheckable(True)
         self.pl_action.setChecked(self.settings.value("show_playlist", True, type=bool))
         self.pl_action.toggled.connect(lambda on: self._toggle_panel(self.playlist_panel, "show_playlist", on))
@@ -373,50 +501,24 @@ class MainWindow(QMainWindow):
         self.status_action.setCheckable(True)
         self.status_action.setChecked(self.settings.value("show_status", True, type=bool))
         self.status_action.toggled.connect(lambda on: self._toggle_panel(self.statusBar(), "show_status", on))
-        m.addAction("Vain video (piilota paneelit)", QKeySequence("Ctrl+0"), self.video_only)
+        m.addAction(A["video_only"])
         m.addSeparator()
-        color_menu = m.addMenu("Korostusväri")
-        self.color_group = QActionGroup(self)
-        for name, col in theme.ACCENTS:
-            a = color_menu.addAction(icon("app", col, 32), name)
-            a.setCheckable(True)
-            a.setChecked(col.lower() == self.accent.lower())
-            a.triggered.connect(lambda _=False, c=col: self.set_accent(c))
-            self.color_group.addAction(a)
-        color_menu.addSeparator()
-        color_menu.addAction("Oma väri…", self.pick_accent)
-        m.addSeparator()
-        m.addAction("Koko näyttö", QKeySequence("F11"), self.toggle_fullscreen)
+        m.addAction(A["fullscreen"])
         self.show_all_action = QAction("Näytä kaikki tiedostot (myös tuntemattomat)", self, checkable=True)
         self.show_all_action.setChecked(self.settings.value("show_all", False, type=bool))
         self.show_all_action.toggled.connect(self.set_show_all)
         m.addAction(self.show_all_action)
         self.set_show_all(self.show_all_action.isChecked())
-        m.addAction("Tiedoston tekniset tiedot", QKeySequence("Ctrl+I"), self.show_file_info)
+        m.addAction(A["file_info"])
 
         # Ohje
         m = mb.addMenu("&Ohje")
-        m.addAction("Pikanäppäimet", self.show_help)
+        m.addAction("Pikanäppäimet…", self.show_help)
         m.addAction("Tietoja", self.about)
 
-    def _build_shortcuts(self):
-        def sc(key, slot):
-            s = QShortcut(QKeySequence(key), self, slot)
-            s.setContext(Qt.ApplicationShortcut)  # toimii myös koko näytön palkeissa
-        sc(Qt.Key_Space, self.toggle_pause)
-        sc("F", self.toggle_fullscreen)
-        sc(Qt.Key_Escape, lambda: self.fullscreen and self.toggle_fullscreen())
-        sc(Qt.Key_Delete, self.remove_selected)
-        sc(Qt.Key_MediaTogglePlayPause, self.toggle_pause)
-        sc(Qt.Key_MediaPlay, self.toggle_pause)
-        sc(Qt.Key_MediaPause, self.toggle_pause)
-        sc(Qt.Key_MediaStop, self.stop)
-        sc(Qt.Key_MediaNext, self.next)
-        sc(Qt.Key_MediaPrevious, self.prev)
-
     def _build_fullscreen(self):
-        # Yläpalkki: nimi + valikko + poistu
-        self.top_ov = Overlay(self)
+        # Yläpalkki: valikko + nimi + poistu. Palkit ovat videon päällä (lapsi-widgetit).
+        self.top_ov = Overlay(self.video)
         self.ov_title = QLabel("")
         self.ov_title.setObjectName("ovTitle")
         self.ov_menu_btn = self._button("Valikko", self.show_main_menu)
@@ -427,12 +529,18 @@ class MainWindow(QMainWindow):
         self.top_ov.lay.addWidget(self.ov_title, 1)
         self.top_ov.lay.addWidget(self.ov_exit_btn)
         # Alapalkki: ohjaimet siirretään tähän koko näytön ajaksi
-        self.bottom_ov = Overlay(self)
+        self.bottom_ov = Overlay(self.video)
         self.bottom_ov.lay.setContentsMargins(0, 0, 0, 0)
+        self.video.installEventFilter(self)
 
-        self.hide_timer = QTimer(self, singleShot=True, interval=HIDE_DELAY_MS,
+        self.hide_timer = QTimer(self, singleShot=True, interval=int(self.cfg.get("hide_delay") * 1000),
                                  timeout=self._maybe_hide_overlays)
-        self.mouse_timer = QTimer(self, interval=120, timeout=self._poll_mouse)
+        self.mouse_timer = QTimer(self, interval=150, timeout=self._poll_mouse)
+
+    def eventFilter(self, obj, e):
+        if obj is self.video and e.type() == QEvent.Resize and self.fullscreen:
+            self._place_overlays()
+        return super().eventFilter(obj, e)
 
     # ============================================================ Teema
     def refresh_icons(self):
@@ -450,22 +558,17 @@ class MainWindow(QMainWindow):
 
     def set_accent(self, color):
         self.accent = QColor(color).name()
-        self.settings.setValue("accent", self.accent)
+        self.cfg.set("accent", self.accent)
+        self.video.accent = QColor(self.accent)
         theme.apply(QApplication.instance(), self.accent)
-        for a in self.color_group.actions():
-            a.setChecked(False)
-        for a, (_, col) in zip(self.color_group.actions(), theme.ACCENTS):
-            a.setChecked(col.lower() == self.accent.lower())
         self.refresh_icons()
         self.rebuild_playlist()
-        self.update_now_playing()
+        self._drive_sig = None
+        self.refresh_drives()
         if self.state.get("idle-active", True):
             self.show_idle()
-
-    def pick_accent(self):
-        c = QColorDialog.getColor(QColor(self.accent), self, "Valitse korostusväri")
-        if c.isValid():
-            self.set_accent(c.name())
+        else:
+            self.update_now_playing()
 
     def _toggle_panel(self, widget, key, on):
         widget.setVisible(on)
@@ -632,14 +735,20 @@ class MainWindow(QMainWindow):
         if self.special(path):
             return
         p = Path(path)
-        files = media_in_folder(p.parent)
+        files = media_in_folder(p.parent) if self.cfg.get("queue_folder") else [p]
         if p not in files:
             files = [p]
+        self.save_position()
         self.video.cmd("stop")  # tyhjentää soittolistan
         for f in files:
             self.video.cmd("loadfile", str(f), "append")
         self.video.cmd("playlist-play-index", files.index(p))
         self.video.set("pause", False)
+
+    def save_position(self):
+        """Jatka siitä mihin jäit: tallenna nykyisen tiedoston kohta ennen vaihtoa."""
+        if self.cfg.get("resume") and not self.state.get("idle-active", True):
+            self.video.cmd("write-watch-later-config")
 
     def add_paths(self, paths, play=False, replace=False):
         files = []
@@ -655,6 +764,8 @@ class MainWindow(QMainWindow):
         if not files:
             return
         idle = self.state.get("idle-active", True)
+        if replace or (play and not idle):
+            self.save_position()
         for i, f in enumerate(files):
             if i == 0 and replace:
                 mode = "replace"
@@ -734,7 +845,7 @@ class MainWindow(QMainWindow):
             self.repeat_actions["off"].setChecked(True)
 
     def set_exclusive(self, on):
-        self.settings.setValue("exclusive", on)
+        self.cfg.set("exclusive", on)
         self.video.set_exclusive(on)
         self.update_audio_info()
 
@@ -854,6 +965,10 @@ class MainWindow(QMainWindow):
         elif name == "video-params":
             self.update_now_playing()
             self.update_audio_info()
+            if (self.cfg.get("auto_fullscreen") and not self._auto_fs_done and not self.fullscreen
+                    and self.is_real_video()):
+                self._auto_fs_done = True
+                self.toggle_fullscreen()
         elif name in ("audio-params", "audio-out-params", "audio-codec-name", "current-ao",
                       "af", "audio-exclusive", "video-codec", "hwdec-current"):
             self.update_audio_info()
@@ -861,6 +976,7 @@ class MainWindow(QMainWindow):
             self.update_repeat_state()
 
     def on_file_loaded(self):
+        self._auto_fs_done = False
         if self.pending_chapter is not None:
             ch, self.pending_chapter = self.pending_chapter, None
             QTimer.singleShot(100, lambda: self.video.set("chapter", ch))
@@ -875,44 +991,26 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(msg, 10000)
 
     # ---- Hiiri ja näppäimet videon päällä
-    def on_video_key(self, key):
-        if key == "MBTN_LEFT":
-            if time.monotonic() - self._last_dbl > 0.15:
-                self._press_time = time.monotonic()
-                self.click_timer.start()
+    def on_video_click(self):
+        if self.cfg.get("click_action") != "pause":
             return
-        if key == "MBTN_LEFT_DBL":
-            self._last_dbl = time.monotonic()
-            self.click_timer.stop()
-            # jos tuplaklikkauksen ensimmäinen klikkaus ehti jo pysäyttää, perutaan se
-            if time.monotonic() - self._last_click_pause < QApplication.doubleClickInterval() / 1000:
-                self.toggle_pause()
-                self._last_click_pause = 0.0
-            self.toggle_fullscreen()
-            return
-        actions = {
-            "f": self.toggle_fullscreen, "F": self.toggle_fullscreen,
-            "SPACE": self.toggle_pause, "MBTN_RIGHT": self.show_main_menu,
-            "ESC": lambda: self.fullscreen and self.toggle_fullscreen(),
-            "RIGHT": lambda: self.video.cmd("seek", 5), "LEFT": lambda: self.video.cmd("seek", -5),
-            "UP": lambda: self.video.cmd("add", "volume", 5),
-            "DOWN": lambda: self.video.cmd("add", "volume", -5),
-            "WHEEL_UP": lambda: self.video.cmd("add", "volume", 2),
-            "WHEEL_DOWN": lambda: self.video.cmd("add", "volume", -2),
-            "m": lambda: self.video.cmd("cycle", "mute"),
-            "n": self.next, "p": self.prev,
-            "PGUP": lambda: self.video.cmd("add", "chapter", 1),
-            "PGDWN": lambda: self.video.cmd("add", "chapter", -1),
-        }
-        fn = actions.get(key)
-        if fn:
-            fn()
-
-    def _single_click(self):
         if self.state.get("idle-active", True) and not self.playlist:
             return
-        self._last_click_pause = self._press_time  # klikkauksen hetki, ei ajastimen
+        self._click_time = time.monotonic()
         self.toggle_pause()
+
+    def on_video_double_click(self):
+        # Tuplaklikkauksen ensimmäinen klikkaus vaihtoi jo tauon -> palautetaan ennalleen
+        if self.cfg.get("click_action") == "pause" and time.monotonic() - self._click_time < 1.0:
+            self.toggle_pause()
+        if self.cfg.get("dblclick_action") == "fullscreen":
+            self.toggle_fullscreen()
+
+    def on_video_wheel(self, direction):
+        if self.cfg.get("wheel_action") == "seek":
+            self.video.cmd("seek", direction * self.cfg.get("seek_short"), "relative+exact")
+        else:
+            self.video.cmd("add", "volume", direction * max(1, self.cfg.get("volume_step") // 2))
 
     def show_main_menu(self):
         """Koko valikko yhtenä ponnahdusvalikkona (oikea klikkaus videolla / ☰)."""
@@ -922,19 +1020,20 @@ class MainWindow(QMainWindow):
                 menu.addMenu(a.menu())
         menu.addSeparator()
         menu.addAction("Poistu koko näytöstä" if self.fullscreen else "Koko näyttö", self.toggle_fullscreen)
+        menu.addAction("Asetukset…", self.open_settings)
         menu.exec(QCursor.pos())
 
     # ============================================================ Näkymät
-    def _ass_color(self, hexcol):
-        c = QColor(hexcol)
-        return f"&H{c.blue():02X}{c.green():02X}{c.red():02X}&"
-
     def show_idle(self):
-        a = self._ass_color(self.accent)
-        self.video.osd(
-            f"{{\\an5\\fs58\\bord0\\1c{a}}}Mediasoitin\\N"
-            "{\\fs24\\1c&H8C8C8C&}Valitse tiedosto vasemmalta, raahaa tiedostoja tähän\\N"
-            "tai tuplaklikkaa CD/DVD-levyä.")
+        self.video.set_show_frame(False)
+        if self.cfg.get("show_hint"):
+            self.video.set_info([
+                ("Mediasoitin", 30, self.accent, False),
+                ("Valitse tiedosto vasemmalta, raahaa tiedostoja tähän", 12, theme.MUTED, False),
+                ("tai tuplaklikkaa CD/DVD-levyä.", 12, theme.MUTED, False),
+            ])
+        else:
+            self.video.set_info(None)
         self.setWindowTitle("Mediasoitin")
         self.ov_title.setText("")
 
@@ -949,7 +1048,7 @@ class MainWindow(QMainWindow):
         if self.state.get("idle-active", True):
             return
         title = self.state.get("media-title") or ""
-        path = self.video.get("path") or ""
+        path = self.state.get("path") or ""
         if path.startswith("cdtrack://"):
             title = f"Musiikki-CD – kappale {path.rsplit('/', 1)[-1]}"
         md = self.state.get("metadata") or {}
@@ -963,17 +1062,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{title} – Mediasoitin" if title else "Mediasoitin")
         self.ov_title.setText(f"{artist} – {title}" if artist else title)
 
+        has_frame = bool((self.state.get("video-params") or {}).get("w"))
+        self.video.set_show_frame(has_frame)
         if self.is_real_video():
-            self.video.osd("")
+            self.video.set_info(None)
             return
-        has_cover = bool((self.state.get("video-params") or {}).get("w"))
-        pos = "{\\an2\\bord3\\3c&H000000&}" if has_cover else "{\\an5\\bord0}"
-        text = pos + "{\\fs46\\1c&HFFFFFF&}" + _ass(title)
+        lines = [(title, 22, "#FFFFFF", False)]
         if artist:
-            text += f"\\N{{\\fs30\\1c{self._ass_color(self.accent)}}}" + _ass(artist)
+            lines.append((artist, 15, self.accent, False))
         if album:
-            text += "\\N{\\fs24\\1c&H8C8C8C&}" + _ass(album)
-        self.video.osd(text)
+            lines.append((album, 12, theme.MUTED, False))
+        self.video.set_info(lines, bottom=has_frame)   # kansikuvan kanssa teksti alareunaan
 
     def update_audio_info(self):
         ap = self.state.get("audio-params")
@@ -1097,21 +1196,20 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Tiedoston tiedot", "<table cellspacing=6>" + "".join(rows) + "</table>")
 
     def show_help(self):
-        QMessageBox.information(self, "Pikanäppäimet", """<table cellspacing=5>
-<tr><td><b>Klikkaus videoon</b></td><td>Tauko / jatka</td></tr>
-<tr><td><b>Tuplaklikkaus</b></td><td>Koko näyttö</td></tr>
-<tr><td><b>Oikea klikkaus videoon</b></td><td>Valikko</td></tr>
-<tr><td><b>Välilyönti</b></td><td>Tauko / jatka</td></tr>
-<tr><td><b>F / F11, Esc</b></td><td>Koko näyttö, poistu</td></tr>
-<tr><td><b>← →</b> (videolla)</td><td>Kelaa 5 s</td></tr>
-<tr><td><b>Shift + ← →</b></td><td>Kelaa 10 s</td></tr>
-<tr><td><b>Ctrl + ← →</b></td><td>Edellinen / seuraava</td></tr>
-<tr><td><b>↑ ↓ / rulla</b> (videolla)</td><td>Äänenvoimakkuus</td></tr>
-<tr><td><b>Ctrl + ↑ ↓</b></td><td>Äänenvoimakkuus</td></tr>
-<tr><td><b>M</b></td><td>Mykistä</td></tr>
-<tr><td><b>Ctrl + 1 / 2 / 0</b></td><td>Lähteet / soittolista / vain video</td></tr>
-<tr><td><b>Ctrl + I</b></td><td>Tiedoston tekniset tiedot</td></tr>
-</table>""")
+        rows = ["<tr><td><b>Klikkaus videoon</b></td><td>Tauko / jatka</td></tr>",
+                "<tr><td><b>Tuplaklikkaus videoon</b></td><td>Koko näyttö</td></tr>",
+                "<tr><td><b>Oikea klikkaus videoon</b></td><td>Valikko</td></tr>",
+                "<tr><td><b>Rulla videon päällä</b></td><td>"
+                + ("Kelaus" if self.cfg.get("wheel_action") == "seek" else "Äänenvoimakkuus") + "</td></tr>"]
+        for aid, label, _d, _g in ACTIONS:
+            k = self.act[aid].shortcut().toString(QKeySequence.NativeText)
+            if k:
+                rows.append(f"<tr><td><b>{_esc(k)}</b></td><td>{_esc(self.act[aid].text())}</td></tr>")
+        box = QMessageBox(self)
+        box.setWindowTitle("Pikanäppäimet")
+        box.setText("<table cellspacing=4>" + "".join(rows) + "</table>"
+                    "<p style='color:#8C8C8C'>Pikanäppäimiä voi muuttaa: Tiedosto → Asetukset → Pikanäppäimet.</p>")
+        box.exec()
 
     def about(self):
         QMessageBox.about(self, "Tietoja", f"<b>Mediasoitin {__version__}</b><br><br>"
@@ -1121,23 +1219,25 @@ class MainWindow(QMainWindow):
     # ======================================================== Koko näyttö
     def toggle_fullscreen(self):
         self.fullscreen = not self.fullscreen
+        self._fs_confirmed = False
         if self.fullscreen:
             self._was_max = self.isMaximized()
             self.split_left.hide()
             self.playlist_panel.hide()
             self.menuBar().hide()
             self.statusBar().hide()
-            self.bottom_ov.lay.addWidget(self.controls)   # ohjaimet kelluvaan palkkiin
+            self.bottom_ov.lay.addWidget(self.controls)   # ohjaimet videon päälle
             self.controls.show()
             self.showFullScreen()
             self._last_cursor = QCursor.pos()
-            QTimer.singleShot(150, self._show_overlays)
+            QTimer.singleShot(100, self._show_overlays)
             self.mouse_timer.start()
         else:
             self.mouse_timer.stop()
             self.hide_timer.stop()
             self.top_ov.hide()
             self.bottom_ov.hide()
+            self.video.unsetCursor()
             self.central_layout.addWidget(self.controls)  # takaisin ikkunan alareunaan
             self.controls.show()
             self.split_left.setVisible(self.lib_action.isChecked())
@@ -1145,15 +1245,15 @@ class MainWindow(QMainWindow):
             self.menuBar().show()
             self.statusBar().setVisible(self.status_action.isChecked())
             self.showMaximized() if getattr(self, "_was_max", False) else self.showNormal()
-            self.video.set("cursor-autohide", 1500)
+            self.video.setFocus()
         self.refresh_icons()
 
     def _place_overlays(self):
-        g = self.geometry()
+        w, h = self.video.width(), self.video.height()
         th = self.top_ov.sizeHint().height()
         bh = max(self.controls.sizeHint().height(), 52)
-        self.top_ov.setGeometry(g.x(), g.y(), g.width(), th)
-        self.bottom_ov.setGeometry(g.x(), g.y() + g.height() - bh, g.width(), bh)
+        self.top_ov.setGeometry(0, 0, w, th)
+        self.bottom_ov.setGeometry(0, h - bh, w, bh)
 
     def _show_overlays(self):
         if not self.fullscreen:
@@ -1163,36 +1263,48 @@ class MainWindow(QMainWindow):
         self.bottom_ov.show()
         self.top_ov.raise_()
         self.bottom_ov.raise_()
-        self.video.set("cursor-autohide", "no")
+        self.video.unsetCursor()
         self.hide_timer.start()
 
     def _maybe_hide_overlays(self):
         if not self.fullscreen:
             return
         pos = QCursor.pos()
-        over = self.top_ov.geometry().contains(pos) or self.bottom_ov.geometry().contains(pos)
+        over = any(o.isVisible() and o.rect().contains(o.mapFromGlobal(pos))
+                   for o in (self.top_ov, self.bottom_ov))
         if over or QApplication.activePopupWidget() or self.seek_slider.dragging:
             self.hide_timer.start()  # hiiri palkin päällä tai valikko auki: pidetään näkyvissä
             return
         self.top_ov.hide()
         self.bottom_ov.hide()
-        self.video.set("cursor-autohide", "always")  # piilota myös hiiren osoitin
+        self.video.setCursor(Qt.BlankCursor)  # piilota myös hiiren osoitin
+        self.video.setFocus()
 
     def _poll_mouse(self):
         pos = QCursor.pos()
         if pos != self._last_cursor:
             self._last_cursor = pos
-            if not self.bottom_ov.isVisible():
-                self._show_overlays()
-            else:
-                self.hide_timer.start()
+            self.on_mouse_activity()
+
+    def on_mouse_activity(self):
+        if not self.fullscreen:
+            return
+        self._last_cursor = QCursor.pos()
+        if not self.bottom_ov.isVisible():
+            self._show_overlays()
+        else:
+            self.hide_timer.start()
 
     def changeEvent(self, e):
-        # Jos koko näytöstä poistutaan muuta kautta (esim. Win-näppäin), siivotaan tila
+        # Jos koko näytöstä poistutaan muuta kautta (esim. Win-näppäin), siivotaan tila.
+        # Reagoidaan vasta kun koko näyttö on ensin varmasti ollut päällä.
         super().changeEvent(e)
-        if e.type() == e.Type.WindowStateChange and self.fullscreen and not self.isFullScreen():
-            QTimer.singleShot(0, lambda: self.fullscreen and not self.isFullScreen()
-                              and self.toggle_fullscreen())
+        if e.type() == QEvent.WindowStateChange and self.fullscreen:
+            if self.isFullScreen():
+                self._fs_confirmed = True
+            elif getattr(self, "_fs_confirmed", False):
+                QTimer.singleShot(0, lambda: self.fullscreen and not self.isFullScreen()
+                                  and self.toggle_fullscreen())
 
     # =================================================== Raahaa ja pudota
     def dragEnterEvent(self, e):
@@ -1207,15 +1319,14 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         if self.fullscreen:
             self.toggle_fullscreen()
+        if self.cfg.get("resume"):
+            self.video.cmd("write-watch-later-config")
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("split_main", self.split_main.saveState())
         self.settings.setValue("split_left", self.split_left.saveState())
         self.settings.setValue("volume", self.vol_slider.value())
-        self.top_ov.close()
-        self.bottom_ov.close()
         self.video.shutdown()
         super().closeEvent(e)
-
 
 def _ass(s):
     return str(s).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", " ")
@@ -1230,8 +1341,7 @@ def main():
     app = QApplication(sys.argv)
     locale.setlocale(locale.LC_NUMERIC, "C")  # mpv vaatii tämän
     app.setApplicationName("Mediasoitin")
-    settings = QSettings("Mediasoitin", "Mediasoitin")
-    theme.apply(app, settings.value("accent", theme.DEFAULT_ACCENT, type=str))
+    theme.apply(app, Config().get("accent"))
     files = [a for a in sys.argv[1:] if not a.startswith("-")]
     w = MainWindow(files)
     w.show()

@@ -94,7 +94,9 @@ QToolButton::menu-indicator {{ image: none; }}
 QToolButton#playButton {{ background: {accent}; border-radius: 20px; padding: 8px; }}
 QToolButton#playButton:hover {{ background: {accent_hover}; }}
 
-QWidget#controls, QWidget#overlay {{ background: {BG}; }}
+QWidget#controls {{ background: {BG}; }}
+QWidget#overlay {{ background: rgba(0,0,0,215); }}
+QWidget#overlay QWidget#controls {{ background: transparent; border: none; }}
 QWidget#controls {{ border-top: 1px solid {BORDER}; }}
 
 QSlider::groove:horizontal {{ height: 4px; background: #2A2A2A; border-radius: 2px; }}
@@ -119,4 +121,20 @@ QPushButton:hover {{ border-color: {accent}; }}
 QPushButton:default {{ background: {accent}; border-color: {accent}; }}
 QComboBox {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 6px; padding: 4px 8px; }}
 QMessageBox, QDialog {{ background: {SURFACE}; }}
+QDialog QWidget {{ background: {SURFACE}; }}
+QCheckBox {{ spacing: 8px; background: transparent; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid #555; border-radius: 4px; background: {BG}; }}
+QCheckBox::indicator:hover {{ border-color: {accent}; }}
+QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
+QTabWidget::pane {{ border: 1px solid {BORDER}; border-radius: 6px; top: -1px; }}
+QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 7px 14px; border: none;
+    border-bottom: 2px solid transparent; }}
+QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {accent}; }}
+QTabBar::tab:hover {{ color: {TEXT}; }}
+QSpinBox, QDoubleSpinBox, QLineEdit, QKeySequenceEdit QLineEdit {{ background: {BG}; border: 1px solid {BORDER};
+    border-radius: 6px; padding: 4px 6px; selection-background-color: {accent}; }}
+QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus {{ border-color: {accent}; }}
+QTableWidget {{ background: {SURFACE}; gridline-color: {BORDER}; border: none; }}
+QTableWidget::item {{ padding: 4px; }}
+QComboBox QAbstractItemView {{ background: {SURFACE2}; selection-background-color: {accent_sel}; }}
 """

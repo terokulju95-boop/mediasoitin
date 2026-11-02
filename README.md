@@ -16,6 +16,7 @@ Toistomoottorina on **mpv (libmpv + FFmpeg)**, joten käytännössä kaikki tied
 - **Saumaton toisto** (gapless) albumeille ja live-levyille.
 - **Paras kuvanlaatu.** Käytössä on mpv:n *high-quality*-profiili ja laitteistopurku, joka ei heikennä kuvaa.
 - **Selkeä musta OLED-teema** korostusvärillä (oletus tumma oranssi). Värin voi vaihtaa sovelluksessa.
+- **Asetukset-ikkuna** (*Tiedosto → Asetukset*, Ctrl + ,): pikanäppäimet, kelausajat, äänenvoimakkuuden askel, hiiren toiminnot, kuvanlaatu, tekstitykset, ääniraidan kieli, "jatka siitä mihin jäit" ja ulkoasu.
 - **Muokattava näkymä:** lähteet, soittolista ja tilarivi voi näyttää tai piilottaa, ja paneelien koon voi säätää vetämällä. Asetukset muistetaan.
 - **Koko näyttö ilman häiriöitä:** palkit katoavat, kun hiiri on paikallaan, ja tulevat esiin, kun hiirtä liikuttaa.
 - Soittolista (sekoitus, toisto, järjestely), ääniraidan ja tekstityksen valinta, äänilaitteen valinta sekä raahaa ja pudota.
@@ -33,28 +34,44 @@ Asennusta ei tarvita. Jos haluat avata tiedostot aina tällä soittimella, valit
 
 Näytöllä on vain olennainen: lähteet ja tiedostot vasemmalla, video keskellä, soittolista oikealla ja ohjaimet alhaalla. Kaikki muut toiminnot löytyvät yläreunan valikoista. Koko valikon saa auki myös hiiren oikealla painikkeella videon päältä.
 
-| Toiminto | Miten |
+| Toiminto | Oletus |
 |---|---|
 | Tauko / jatka | **Klikkaa videota**, tai välilyönti |
 | Koko näyttö | **Tuplaklikkaa videota**, tai F / F11. Esc palaa. |
-| Valikko koko näytöllä | Liikuta hiirtä ja paina ☰ vasemmasta yläkulmasta, tai klikkaa hiiren oikealla |
-| Toista tiedosto | Tuplaklikkaa tiedostoa. Saman kansion muut kappaleet tulevat jonoon. |
-| Toista CD tai DVD | Tuplaklikkaa levyä Lähteet-luettelossa, tai *Tiedosto → Toista levy* |
-| Kelaus | Videon päällä ← → (5 s), muualla Shift + ← → (10 s) |
-| Äänenvoimakkuus | Videon päällä ↑ ↓ tai hiiren rulla, muualla Ctrl + ↑ ↓ |
+| Valikko | Hiiren oikea videon päällä. Koko näytöllä myös ☰ vasemmassa yläkulmassa. |
+| Kelaus | ← → (5 s), Shift + ← → (30 s) |
+| Äänenvoimakkuus | ↑ ↓ tai hiiren rulla videon päällä |
 | Seuraava / edellinen | Ctrl + → / Ctrl + ←, tai mediapainikkeet |
-| Soittolistan muokkaus | Hiiren oikea soittolistassa, tai *Soittolista*-valikko |
+| Luku / CD-kappale | PgUp / PgDown |
+| Nopeus | ] nopeammin, [ hitaammin, Backspace normaali |
+| Ruutu kerrallaan | . eteen, , taakse |
+| Ääniraita / tekstitys | A / S, tekstitys päälle tai pois V |
+| Toista tiedosto | Tuplaklikkaa tiedostoa. Saman kansion muut kappaleet tulevat jonoon. |
+| Toista CD tai DVD | Tuplaklikkaa levyä Lähteet-luettelossa |
+
+Kaikki pikanäppäimet, kelausajat ja hiiren toiminnot voi vaihtaa kohdassa **Tiedosto → Asetukset**. *Ohje → Pikanäppäimet* näyttää aina voimassa olevat näppäimet. Kun tiedosto- tai soittolista on valittuna, nuolinäppäimet liikkuvat listassa. Klikkaa videota, niin ne kelaavat taas.
+
+### Asetukset
+
+| Välilehti | Mitä voi muuttaa |
+|---|---|
+| Toisto | Lyhyen ja pitkän kelauksen pituus, äänenvoimakkuuden askel, hiiren rulla (äänenvoimakkuus / kelaus), klikkauksen ja tuplaklikkauksen toiminto, palkkien piiloutumisaika koko näytöllä, kansion jonotus, jatka siitä mihin jäit, automaattinen koko näyttö |
+| Ääni | Bit-perfect, ääniraidan kielet, äänenvoimakkuuden muistaminen |
+| Kuva | Kuvanlaatu (Paras / Normaali / Nopea), laitteistopurku |
+| Tekstitys | Kielet, tekstin koko, samannimisten tekstitystiedostojen automaattinen lataus |
+| Pikanäppäimet | Jokaisen toiminnon näppäin, palautus oletuksiin, varoitus päällekkäisistä näppäimistä |
+| Ulkoasu | Korostusväri, ohjetekstin näyttäminen |
 
 ### Näkymän muokkaus
 
-- **Näytä → Lähteet ja tiedostot** (Ctrl + 1) ja **Näytä → Soittolista** (Ctrl + 2) näyttävät ja piilottavat paneelit.
+- **Näytä → Lähteet ja tiedostot** (Ctrl + 1) ja **Näytä → Soittolista** (Ctrl + 2) näyttävät ja piilottavat paneelit. Myös *Näytä → Tilarivi*.
 - **Näytä → Vain video** (Ctrl + 0) piilottaa molemmat paneelit kerralla.
-- **Näytä → Korostusväri** vaihtaa teeman värin. Valittavana on valmiita värejä tai oma värisi.
+- **Asetukset → Ulkoasu** vaihtaa teeman korostusvärin. Valittavana on valmiita värejä tai oma värisi.
 - Paneelien rajoja voi vetää hiirellä. Soitin muistaa koon, paikan ja valinnat seuraavalla kerralla.
 
 ### Bit-perfect-ääni
 
-Laita päälle valikosta *Ääni → Bit-perfect*. Silloin:
+Laita päälle valikosta *Ääni → Bit-perfect* (tai *Asetukset → Ääni*). Silloin:
 
 - Windows ei miksaa eikä muunna ääntä, ja esim. 96 kHz / 24-bit FLAC menee DAC:lle sellaisenaan.
 - Muiden ohjelmien äänet eivät kuulu sillä aikaa.
@@ -92,7 +109,8 @@ mediasoitin.py          käynnistys
 soitin/app.py           pääikkuna: selain, soittolista, ohjaimet, koko näyttö
 soitin/theme.py         värit ja tyylit (helppo muokata)
 soitin/icons.py         piirretyt kuvakkeet
-soitin/player.py        mpv-moottori upotettuna ikkunaan, laatuasetukset
+soitin/player.py        mpv-moottori, video piirretään sovelluksen OpenGL-näkymään
+soitin/settings.py      asetusten oletusarvot, pikanäppäinlista ja asetusikkuna
 soitin/cdaudio.py       musiikki-CD:n suora digitaalinen luku (Windows)
 soitin/drives.py        asemien tunnistus (kiintolevy, USB, CD/DVD)
 soitin/media.py         tiedostotyypit ja apufunktiot

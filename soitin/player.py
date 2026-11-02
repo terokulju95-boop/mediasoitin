@@ -1,26 +1,25 @@
-"""mpv-toistomoottori upotettuna Qt-ikkunaan.
+"""mpv-toistomoottori piirrettynä sovelluksen omaan OpenGL-näkymään.
 
-libmpv purkaa äänen ja kuvan alkuperäisessä muodossaan (FFmpeg), joten
-lähes mikä tahansa tiedosto toistuu ilman muunnoksia.
+Video piirretään mpv:n render-rajapinnalla suoraan Qt-ikkunaan. Näin hiiri ja
+näppäimistö tulevat aina sovellukselle (klikkaus = tauko, tuplaklikkaus = koko
+näyttö), ja palkit voi näyttää videon päällä.
+
+libmpv purkaa äänen ja kuvan alkuperäisessä muodossaan (FFmpeg).
 """
 import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QOpenGLContext, QPainter
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 
 def _prepare_libmpv():
     """Etsi libmpv-2.dll sovelluksen kansiosta (Windows)."""
     here = Path(__file__).resolve().parent
-    candidates = [
-        Path(getattr(sys, "_MEIPASS", here)),
-        Path(sys.executable).resolve().parent,
-        here.parent,
-        here.parent / "lib",
-    ]
-    for d in candidates:
+    for d in (Path(getattr(sys, "_MEIPASS", here)), Path(sys.executable).resolve().parent,
+              here.parent, here.parent / "lib"):
         if (d / "libmpv-2.dll").exists():
             os.environ["PATH"] = str(d) + os.pathsep + os.environ.get("PATH", "")
             if hasattr(os, "add_dll_directory"):
@@ -40,9 +39,9 @@ def _s(v):
 
 class MpvSignals(QObject):
     prop = Signal(str, object)          # ominaisuuden nimi, arvo
-    end_file = Signal(str, str, str)    # syy, virhe, tiedosto
+    end_file = Signal(str, str, str)    # syy, virhe, soittolistan id
     file_loaded = Signal()
-    key = Signal(str)                   # näppäin/hiiritapahtuma videoikkunassa
+    redraw = Signal()
 
 
 WATCHED = [
@@ -50,66 +49,58 @@ WATCHED = [
     "media-title", "metadata", "chapter", "chapter-list", "track-list", "volume", "mute",
     "audio-params", "audio-out-params", "audio-codec-name", "current-ao",
     "video-params", "video-codec", "loop-playlist", "loop-file", "af",
-    "audio-exclusive", "hwdec-current",
+    "audio-exclusive", "hwdec-current", "speed", "path",
 ]
 
-KEYS = ["MBTN_LEFT", "MBTN_LEFT_DBL", "SPACE", "f", "F", "ESC", "RIGHT", "LEFT", "UP", "DOWN",
-        "m", "n", "p", "PGUP", "PGDWN", "WHEEL_UP", "WHEEL_DOWN", "MBTN_RIGHT"]
 
+class MpvWidget(QOpenGLWidget):
+    clicked = Signal()
+    double_clicked = Signal()
+    right_clicked = Signal()
+    wheel = Signal(int)          # +1 ylös, -1 alas
+    mouse_moved = Signal()
 
-class MpvWidget(QWidget):
-    """Musta alue, johon mpv piirtää videon."""
-
-    def __init__(self, parent=None, exclusive=False, volume=100):
+    def __init__(self, parent=None, options=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WA_DontCreateNativeAncestors)
-        self.setAttribute(Qt.WA_NativeWindow)
-        self.setStyleSheet("background:#000000;")
         self.setMinimumSize(320, 180)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAttribute(Qt.WA_OpaquePaintEvent)
         self.signals = MpvSignals()
+        self.signals.redraw.connect(self.update)
+        self.render_ctx = None
+        self.show_frame = False       # onko mpv:llä kuvaa (video tai kansikuva)
+        self.info = None              # (rivit, alhaalla?) tekstinäkymä
+        self.accent = QColor("#D35400")
+        # Varmistus: pyydetään piirtoa säännöllisesti, ettei kuva jää jumiin esim.
+        # koko näytön vaihdon jälkeen (mpv odottaa, että edellinen ruutu piirretään).
+        self.kick = QTimer(self, interval=250, timeout=self.update)
 
         opts = dict(
-            wid=str(int(self.winId())),
+            vo="libmpv",
             idle="yes",
             keep_open="no",
-            force_window="yes",         # videoalue pysyy aina olemassa
-            # --- Kuva ---
-            vo="gpu-next,gpu,direct3d,x11,null",
-            hwdec="auto-safe",          # laitteistopurku, kuvanlaatu sama
-            # --- Ääni ---
-            volume=volume,
-            volume_max=100,             # ei vahvistusta -> ei säröä
-            gapless_audio="weak",       # saumaton toisto albumeille
+            hwdec="auto-safe",            # laitteistopurku, kuvanlaatu sama
+            volume_max=100,               # ei vahvistusta -> ei säröä
+            gapless_audio="weak",         # saumaton toisto albumeille
             prefetch_playlist="yes",
             replaygain="no",
-            audio_display="embedded-first",  # näytä kansikuva
-            # --- Ohjaus ---
+            audio_display="embedded-first",
             input_default_bindings="no",
-            input_vo_keyboard="yes",
+            input_vo_keyboard="no",
             osc="no",
-            cursor_autohide=1500,
-            # --- Levyt ---
             cache="yes",
         )
         if sys.platform == "win32":
             opts["ao"] = "wasapi"
-            opts["audio_exclusive"] = "yes" if exclusive else "no"
-
+        opts.update(options or {})
         try:
             self.mpv = mpv.MPV(**opts)
         except Exception:
-            # Varalla yksinkertaisemmat asetukset vanhemmille mpv-versioille
-            for k in ("prefetch_playlist", "audio_display", "cursor_autohide"):
+            for k in ("prefetch_playlist", "audio_display"):
                 opts.pop(k, None)
             self.mpv = mpv.MPV(**opts)
 
-        # Paras kuvanlaatu (mpv:n valmis profiili), jos saatavilla
-        try:
-            self.mpv.command("apply-profile", "high-quality")
-        except Exception:
-            pass
-
-        # Musiikki-CD:t: oma lukija (cdtrack://D/5)
         try:
             self.mpv.register_stream_protocol("cdtrack", cdaudio.open_stream)
         except Exception:
@@ -131,49 +122,130 @@ class MpvWidget(QWidget):
         def _loaded(ev):
             self.signals.file_loaded.emit()
 
-        for k in KEYS:
-            try:
-                self.mpv.register_key_binding(k, self._make_key_handler(k))
-            except Exception:
-                pass
-
-    def _make_key_handler(self, key):
-        def handler(state, *a):
-            # "d-" = painettu alas, "p-" = yksittäinen painallus (rulla, tuplaklikkaus)
-            if state and state[0] in "dp":
-                self.signals.key.emit(key)
-        return handler
-
     def _on_prop(self, name, value):
         self.signals.prop.emit(name, value)
 
-    # --- Apurit ---
+    # ---------------------------------------------------------- OpenGL
+    def initializeGL(self):
+        def get_proc_address(_ctx, name):
+            ctx = QOpenGLContext.currentContext()
+            if ctx is None:
+                return 0
+            addr = ctx.getProcAddress(name.decode())
+            return int(addr) if addr else 0
+
+        self._proc_fn = mpv.MpvGlGetProcAddressFn(get_proc_address)  # pidetään viite
+        self.render_ctx = mpv.MpvRenderContext(
+            self.mpv, "opengl", opengl_init_params={"get_proc_address": self._proc_fn})
+        self.render_ctx.update_cb = self.signals.redraw.emit
+
+    def paintGL(self):
+        r = self.devicePixelRatioF()
+        w, h = int(self.width() * r), int(self.height() * r)
+        if self.render_ctx is not None and self.show_frame:
+            self.render_ctx.render(flip_y=True, opengl_fbo={
+                "w": w, "h": h, "fbo": self.defaultFramebufferObject()})
+            if self.info:
+                self._paint_info(clear=False)
+        else:
+            self._paint_info(clear=True)
+
+    def _paint_info(self, clear):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        if clear:
+            p.fillRect(self.rect(), QColor("#000000"))
+        if not self.info:
+            p.end()
+            return
+        lines, bottom = self.info
+        scale = max(0.6, min(1.6, self.height() / 600))
+        metrics = []
+        total = 0
+        for text, size, color, bold in lines:
+            f = QFont(self.font())
+            f.setPointSizeF(size * scale)
+            f.setBold(bold)
+            p.setFont(f)
+            hgt = p.fontMetrics().height() * 1.15
+            metrics.append((text, f, color, hgt))
+            total += hgt
+        y = (self.height() - total - 40 * scale) if bottom else (self.height() - total) / 2
+        if bottom:
+            p.fillRect(QRectF(0, y - 16 * scale, self.width(), total + 56 * scale), QColor(0, 0, 0, 170))
+        for text, f, color, hgt in metrics:
+            p.setFont(f)
+            p.setPen(QColor(color))
+            p.drawText(QRectF(20, y, self.width() - 40, hgt), Qt.AlignHCenter | Qt.AlignVCenter,
+                       p.fontMetrics().elidedText(text, Qt.ElideRight, self.width() - 40))
+            y += hgt
+        p.end()
+
+    def set_info(self, lines, bottom=False):
+        """lines = [(teksti, pistekoko, väri, lihavoitu), ...]; None poistaa."""
+        self.info = (lines, bottom) if lines else None
+        self.update()
+
+    def set_show_frame(self, on):
+        if on != self.show_frame:
+            self.show_frame = on
+            self.kick.start() if on else self.kick.stop()
+            self.update()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.update()
+
+    # ---------------------------------------------------------- Hiiri
+    def mousePressEvent(self, e):
+        self.setFocus()
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+        elif e.button() == Qt.RightButton:
+            self.right_clicked.emit()
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.double_clicked.emit()
+
+    def wheelEvent(self, e):
+        d = e.angleDelta().y()
+        if d:
+            self.wheel.emit(1 if d > 0 else -1)
+
+    def mouseMoveEvent(self, e):
+        self.mouse_moved.emit()
+
+    # ---------------------------------------------------------- Apurit
+    # Komennot lähetetään asynkronisesti: käyttöliittymä ei koskaan jää odottamaan
+    # mpv:tä (synkroninen kutsu piirtosäikeestä voi jumittaa kuvan hetkeksi).
     def get(self, name, default=None):
         try:
             return self.mpv._get_property(name)
         except Exception:
             return default
 
+    @staticmethod
+    def _str(value):
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        return str(value)
+
     def set(self, name, value):
         try:
-            self.mpv._set_property(name, value)
+            self.mpv.command_async("set", name, self._str(value), callback=lambda e, r: None)
             return True
         except Exception:
             return False
 
     def cmd(self, *args):
         try:
-            self.mpv.command(*args)
+            self.mpv.command_async(*[self._str(a) if not isinstance(a, str) else a for a in args],
+                                   callback=lambda e, r: None)
             return True
         except Exception:
             return False
-
-    def osd(self, ass_text: str):
-        """Pysyvä tekstikerros videon päällä (ASS-muotoilu). Tyhjä poistaa."""
-        if ass_text:
-            self.cmd("osd-overlay", 1, "ass-events", ass_text, 1280, 720, 0)
-        else:
-            self.cmd("osd-overlay", 1, "none", "")
 
     def set_exclusive(self, on: bool):
         """WASAPI exclusive = Windows ei sekoita/muunna ääntä (bit-perfect)."""
@@ -184,6 +256,14 @@ class MpvWidget(QWidget):
         return True
 
     def shutdown(self):
+        try:
+            if self.render_ctx is not None:
+                self.makeCurrent()
+                self.render_ctx.free()
+                self.render_ctx = None
+                self.doneCurrent()
+        except Exception:
+            pass
         try:
             self.mpv.terminate()
         except Exception:
