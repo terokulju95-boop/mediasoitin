@@ -36,6 +36,8 @@ DEFAULTS = {
     # Ulkoasu
     "accent": theme.DEFAULT_ACCENT,
     "show_hint": True,
+    "animations": True,
+    "seek_preview": True,
 }
 
 # Toiminnot, joille voi asettaa pikanäppäimen: (tunnus, nimi, oletusnäppäin, ryhmä)
@@ -61,6 +63,12 @@ ACTIONS = [
     ("audio_cycle", "Vaihda ääniraitaa", "A", "Ääni"),
     ("sub_cycle", "Vaihda tekstitystä", "S", "Tekstitys"),
     ("sub_toggle", "Tekstitys päälle / pois", "V", "Tekstitys"),
+    ("screenshot", "Kuvakaappaus", "Ctrl+S", "Kuva"),
+    ("video_adjust", "Kuvan säädöt", "Ctrl+E", "Kuva"),
+    ("aspect_cycle", "Vaihda kuvasuhdetta", "Ctrl+A", "Kuva"),
+    ("fill_toggle", "Täytä ruutu (rajaa reunat)", "Z", "Kuva"),
+    ("deinterlace_toggle", "Lomituksen poisto päälle / pois", "D", "Kuva"),
+    ("rotate", "Kierrä kuvaa 90°", "Ctrl+R", "Kuva"),
     ("fullscreen", "Koko näyttö", "F", "Näkymä"),
     ("fullscreen_alt", "Koko näyttö (toinen näppäin)", "F11", "Näkymä"),
     ("exit_fullscreen", "Poistu koko näytöstä", "Esc", "Näkymä"),
@@ -68,6 +76,7 @@ ACTIONS = [
     ("toggle_playlist", "Näytä / piilota soittolista", "Ctrl+2", "Näkymä"),
     ("video_only", "Vain video", "Ctrl+0", "Näkymä"),
     ("file_info", "Tiedoston tekniset tiedot", "Ctrl+I", "Näkymä"),
+    ("library_search", "Hae kirjastosta", "Ctrl+F", "Näkymä"),
     ("open_files", "Avaa tiedostoja", "Ctrl+O", "Tiedosto"),
     ("open_folder", "Avaa kansio", "Ctrl+Shift+O", "Tiedosto"),
     ("remove_selected", "Poista valitut soittolistasta", "Delete", "Tiedosto"),
@@ -292,6 +301,8 @@ class SettingsDialog(QDialog):
         row.addWidget(self.accent_swatch)
         f.addRow("Korostusväri:", row)
         f.addRow("", self._check("show_hint", "Näytä ohjeteksti, kun mitään ei toisteta"))
+        f.addRow("", self._check("animations", "Animaatiot (palkit liukuvat esiin ja piiloon)"))
+        f.addRow("", self._check("seek_preview", "Esikatselukuva aikajanan päällä (videot)"))
         f.addRow("", self._note("Paneelien näkyvyyttä voi muuttaa Näytä-valikosta (Ctrl + 1 / 2 / 0) "
                                 "ja kokoa vetämällä paneelien reunoja."))
         return page

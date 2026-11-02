@@ -3,15 +3,20 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QEvent, QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QKeySequence
+from PySide6.QtCore import (QDir, QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation,
+                            QSize, QStandardPaths, Qt, QTimer, QUrl, Signal)
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServices, QIcon,
+                           QKeySequence, QPixmap)
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QSlider, QSplitter,
-    QStyle, QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QFileDialog, QFileSystemModel,
+    QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMenu, QMessageBox, QProgressDialog, QSlider, QSplitter, QStyle, QTabWidget,
+    QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import __version__, cdaudio, theme
+from . import __version__, cdaudio, library, theme, videoadjust
+from .dvdcopy import DvdCopyWorker, disc_size, safe_name, unique_folder
+from .preview import ThumbnailWorker
 from .drives import NETWORK, OPTICAL, REMOVABLE, list_drives, quick_locations
 from .icons import icon
 from .media import (NAME_FILTERS, cda_track_number, describe_format, display_name,
@@ -20,6 +25,9 @@ from .player import MpvWidget
 from .settings import ACTIONS, Config, SettingsDialog
 
 IS_WIN = sys.platform == "win32"
+ASSETS = Path(__file__).resolve().parent / "assets"
+ASPECTS = [("-1", "Alkuperäinen"), ("16:9", "16:9"), ("4:3", "4:3"), ("2.39:1", "21:9 (elokuva 2.39:1)"),
+           ("1.85:1", "1.85:1"), ("1:1", "1:1")]
 NAV_KEYS = {Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp,
             Qt.Key_PageDown, Qt.Key_Home, Qt.Key_End}
 
@@ -40,11 +48,15 @@ class SeekSlider(QSlider):
     """Aikajana: klikkaus hyppää suoraan kohtaan."""
     seek = Signal(float)
 
+    hover = Signal(float, QPoint)    # aika (s), kohta näytöllä
+    hover_end = Signal()
+
     def __init__(self):
         super().__init__(Qt.Horizontal)
         self.dragging = False
         self.setRange(0, 0)
         self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
 
     def _value_at(self, e):
         return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(),
@@ -58,6 +70,12 @@ class SeekSlider(QSlider):
     def mouseMoveEvent(self, e):
         if self.dragging:
             self.setValue(self._value_at(e))
+        if self.maximum() > 0:
+            x = int(min(max(e.position().x(), 0), self.width()))
+            self.hover.emit(self._value_at(e) / 1000.0, self.mapToGlobal(QPoint(x, 0)))
+
+    def leaveEvent(self, e):
+        self.hover_end.emit()
 
     def mouseReleaseEvent(self, e):
         if self.dragging:
@@ -75,7 +93,104 @@ class Overlay(QWidget):
         self.setMouseTracking(True)
         self.lay = QHBoxLayout(self)
         self.lay.setContentsMargins(10, 6, 10, 6)
+        self.at_top = True
+        self.target = None
+        self.effect = QGraphicsOpacityEffect(self)
+        self.effect.setOpacity(1.0)
+        self.setGraphicsEffect(self.effect)
+        self.anim_pos = QPropertyAnimation(self, b"pos", self)
+        self.anim_op = QPropertyAnimation(self.effect, b"opacity", self)
+        for a in (self.anim_pos, self.anim_op):
+            a.setDuration(220)
+            a.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim_op.finished.connect(self._anim_done)
+        self._hiding = False
         self.hide()
+
+    def _offscreen(self):
+        g = self.target
+        return QPoint(g.x(), g.y() - g.height() // 2) if self.at_top else QPoint(g.x(), g.y() + g.height() // 2)
+
+    def slide_in(self, animate):
+        self._hiding = False
+        self.anim_pos.stop()
+        self.anim_op.stop()
+        if not animate:
+            self.setGeometry(self.target)
+            self.effect.setOpacity(1.0)
+            self.show()
+            return
+        if not self.isVisible():
+            self.setGeometry(self.target)
+            self.move(self._offscreen())
+            self.effect.setOpacity(0.0)
+            self.show()
+        self.anim_pos.setStartValue(self.pos())
+        self.anim_pos.setEndValue(self.target.topLeft())
+        self.anim_op.setStartValue(self.effect.opacity())
+        self.anim_op.setEndValue(1.0)
+        self.anim_pos.start()
+        self.anim_op.start()
+
+    def slide_out(self, animate):
+        if not self.isVisible():
+            return
+        if not animate:
+            self.hide()
+            return
+        self._hiding = True
+        self.anim_pos.stop()
+        self.anim_op.stop()
+        self.anim_pos.setStartValue(self.pos())
+        self.anim_pos.setEndValue(self._offscreen())
+        self.anim_op.setStartValue(self.effect.opacity())
+        self.anim_op.setEndValue(0.0)
+        self.anim_pos.start()
+        self.anim_op.start()
+
+    def _anim_done(self):
+        if self._hiding:
+            self._hiding = False
+            self.hide()
+
+    def shown(self):
+        return self.isVisible() and not self._hiding
+
+
+class PreviewPopup(QWidget):
+    """Aikajanan päällä näkyvä aika ja esikatselukuva."""
+
+    def __init__(self):
+        super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setObjectName("preview")
+        self.setAttribute(Qt.WA_StyledBackground)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(2)
+        self.img = QLabel()
+        self.img.setAlignment(Qt.AlignCenter)
+        self.time = QLabel()
+        self.time.setAlignment(Qt.AlignCenter)
+        self.time.setObjectName("previewTime")
+        lay.addWidget(self.img)
+        lay.addWidget(self.time)
+        self.img.hide()
+
+    def show_at(self, text, gpos):
+        self.time.setText(text)
+        self.adjustSize()
+        self.move(gpos.x() - self.width() // 2, gpos.y() - self.height() - 10)
+        self.show()
+        self.raise_()
+
+    def set_image(self, img):
+        if img is None:
+            self.img.hide()
+        else:
+            self.img.setPixmap(QPixmap.fromImage(img))
+            self.img.show()
 
 
 class MainWindow(QMainWindow):
@@ -106,6 +221,27 @@ class MainWindow(QMainWindow):
         quality = self.cfg.get("quality")
         if quality in ("high-quality", "fast"):
             self.video.cmd("apply-profile", quality)
+        shots = Path(QStandardPaths.writableLocation(QStandardPaths.PicturesLocation) or Path.home()) / "Mediasoitin"
+        self.screenshot_dir = shots
+        self.video.set("screenshot-directory", str(shots))
+        self.video.set("screenshot-format", "png")
+        self.video.set("screenshot-template", "%F %wH.%wM.%wS")
+        videoadjust.apply_saved(self.video, self.settings)
+        self.video.set("deinterlace", "auto")   # vanhemmissa mpv-versioissa jää oletukseen
+        self.adjust_dialog = None
+        self.tag_cache = {}             # polku -> tagit (albuminäkymä)
+        self.cover_cache = {}           # polku/kansio -> QPixmap
+        self.library_tracks = library.load_cache()
+        self.scanner = None
+        self.dvd_worker = None
+        self._ready = False
+        QTimer.singleShot(1500, lambda: setattr(self, "_ready", True))
+        self.preview = PreviewPopup()
+        self.thumbs = ThumbnailWorker(self)
+        self.thumbs.ready.connect(self._thumb_ready)
+        self.thumbs.start()
+        self._hover = None
+        self.thumb_timer = QTimer(self, singleShot=True, interval=90, timeout=self._request_thumb)
 
         self._build_ui()
         self._build_actions()
@@ -133,6 +269,8 @@ class MainWindow(QMainWindow):
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
+        self.left_tabs.setCurrentIndex(self.settings.value("left_tab", 0, type=int))
+        self.rebuild_library()
         for name, sp in (("split_main", self.split_main), ("split_left", self.split_left)):
             st = self.settings.value(name)
             if st is not None:
@@ -268,7 +406,14 @@ class MainWindow(QMainWindow):
         self.split_left.addWidget(top_box)
         self.split_left.addWidget(file_box)
         self.split_left.setSizes([220, 480])
-        self.library_panel = self.split_left
+
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setObjectName("leftTabs")
+        self.left_tabs.setDocumentMode(True)
+        self.left_tabs.addTab(self.split_left, "Selaa")
+        self.left_tabs.addTab(self._build_library_panel(), "Kirjasto")
+        self.left_tabs.currentChanged.connect(lambda i: self.settings.setValue("left_tab", i))
+        self.library_panel = self.left_tabs
         self.current_dir = ""
 
         # --- Keskellä: video (pidetään aina näkyvissä, mpv piirtää siihen)
@@ -292,7 +437,7 @@ class MainWindow(QMainWindow):
 
         self.split_main = QSplitter(Qt.Horizontal)
         self.split_main.setHandleWidth(3)
-        self.split_main.addWidget(self.split_left)
+        self.split_main.addWidget(self.left_tabs)
         self.split_main.addWidget(self.video)
         self.split_main.addWidget(pl_box)
         self.split_main.setStretchFactor(1, 1)
@@ -312,6 +457,8 @@ class MainWindow(QMainWindow):
         self.seek_slider = SeekSlider()
         self.seek_slider.setFocusPolicy(Qt.NoFocus)
         self.seek_slider.seek.connect(lambda s: self.video.cmd("seek", s, "absolute+exact"))
+        self.seek_slider.hover.connect(self._seek_hover)
+        self.seek_slider.hover_end.connect(self._seek_hover_end)
         self.seek_slider.valueChanged.connect(
             lambda v: self.seek_slider.dragging and self.pos_label.setText(fmt_time(v / 1000)))
         self.mute_btn = self._button("Mykistä (M)", lambda: self.video.cmd("cycle", "mute"))
@@ -363,10 +510,10 @@ class MainWindow(QMainWindow):
         v = self.video
         slots = {
             "play_pause": self.toggle_pause, "stop": self.stop, "next": self.next, "prev": self.prev,
-            "seek_fwd": lambda: v.cmd("seek", self.cfg.get("seek_short"), "relative+exact"),
-            "seek_back": lambda: v.cmd("seek", -self.cfg.get("seek_short"), "relative+exact"),
-            "seek_fwd_long": lambda: v.cmd("seek", self.cfg.get("seek_long"), "relative+exact"),
-            "seek_back_long": lambda: v.cmd("seek", -self.cfg.get("seek_long"), "relative+exact"),
+            "seek_fwd": lambda: self.seek_by(self.cfg.get("seek_short")),
+            "seek_back": lambda: self.seek_by(-self.cfg.get("seek_short")),
+            "seek_fwd_long": lambda: self.seek_by(self.cfg.get("seek_long")),
+            "seek_back_long": lambda: self.seek_by(-self.cfg.get("seek_long")),
             "next_chapter": lambda: v.cmd("add", "chapter", 1),
             "prev_chapter": lambda: v.cmd("add", "chapter", -1),
             "frame_step": lambda: v.cmd("frame-step"),
@@ -377,9 +524,13 @@ class MainWindow(QMainWindow):
             "vol_up": lambda: v.cmd("add", "volume", self.cfg.get("volume_step")),
             "vol_down": lambda: v.cmd("add", "volume", -self.cfg.get("volume_step")),
             "mute": lambda: v.cmd("cycle", "mute"),
-            "audio_cycle": lambda: v.cmd("cycle", "audio"),
-            "sub_cycle": lambda: v.cmd("cycle", "sub"),
+            "audio_cycle": lambda: (v.cmd("cycle", "audio"), self._toast_track("audio")),
+            "sub_cycle": lambda: (v.cmd("cycle", "sub"), self._toast_track("sub")),
             "sub_toggle": lambda: v.cmd("cycle", "sub-visibility"),
+            "screenshot": self.take_screenshot, "video_adjust": self.open_video_adjust,
+            "aspect_cycle": self.cycle_aspect, "fill_toggle": self.toggle_fill,
+            "deinterlace_toggle": self.toggle_deinterlace, "rotate": self.rotate_video,
+            "library_search": self.focus_library_search,
             "fullscreen": self.toggle_fullscreen, "fullscreen_alt": self.toggle_fullscreen,
             "exit_fullscreen": lambda: self.fullscreen and self.toggle_fullscreen(),
             "toggle_library": lambda: self.lib_action.toggle(),
@@ -399,6 +550,23 @@ class MainWindow(QMainWindow):
             self.act[aid] = a
         self.update_seek_labels()
 
+    def seek_by(self, sec):
+        if self.state.get("idle-active", True):
+            return
+        self.video.cmd("seek", sec, "relative+exact")
+        self.video.toast(f"{'+' if sec > 0 else '−'}{abs(sec)} s")
+
+    def _toast_track(self, kind):
+        def show():
+            for t in self.state.get("track-list") or []:
+                if t.get("type") == kind and t.get("selected"):
+                    name = " ".join(x for x in (t.get("title") or "", f"[{t['lang']}]" if t.get("lang") else "") if x)
+                    self.video.toast(f"{'Ääniraita' if kind == 'audio' else 'Tekstitys'}: {name or t.get('id')}")
+                    return
+            if kind == "sub":
+                self.video.toast("Tekstitys: pois")
+        QTimer.singleShot(250, show)
+
     def update_seek_labels(self):
         s, l = self.cfg.get("seek_short"), self.cfg.get("seek_long")
         self.act["seek_fwd"].setText(f"Kelaa eteen {s} s")
@@ -417,6 +585,7 @@ class MainWindow(QMainWindow):
         self.disc_menu = m.addMenu("Toista levy (CD / DVD)")
         self.disc_menu.aboutToShow.connect(self.fill_disc_menu)
         m.addAction("Toista nykyinen kansio", lambda: self.play_folder(self.current_dir, True))
+        m.addAction("Kopioi DVD kansioon…", self.copy_dvd)
         m.addSeparator()
         m.addAction(A["settings"])
         m.addSeparator()
@@ -438,6 +607,41 @@ class MainWindow(QMainWindow):
         frame = m.addMenu("Ruutu kerrallaan")
         frame.addAction(A["frame_step"])
         frame.addAction(A["frame_back"])
+
+        # Kuva
+        m = mb.addMenu("&Kuva")
+        m.addAction(A["video_adjust"])
+        asp = m.addMenu("Kuvasuhde")
+        self.aspect_group = QActionGroup(self)
+        for value, label in ASPECTS:
+            a = asp.addAction(label)
+            a.setCheckable(True)
+            a.setData(value)
+            a.setChecked(value == "-1")
+            a.triggered.connect(lambda _=False, v=value, l=label: self.set_aspect(v, l))
+            self.aspect_group.addAction(a)
+        asp.addSeparator()
+        asp.addAction(A["aspect_cycle"])
+        self.fill_action = A["fill_toggle"]
+        self.fill_action.setCheckable(True)
+        self.fill_action.triggered.disconnect()
+        self.fill_action.toggled.connect(self.toggle_fill)
+        m.addAction(self.fill_action)
+        m.addAction(A["rotate"])
+        deint = m.addMenu("Lomituksen poisto")
+        self.deint_group = QActionGroup(self)
+        for value, label in (("auto", "Automaattinen (suositus)"), ("yes", "Aina päällä"), ("no", "Pois")):
+            a = deint.addAction(label)
+            a.setCheckable(True)
+            a.setData(value)
+            a.setChecked(value == "auto")
+            a.triggered.connect(lambda _=False, v=value: self.set_deinterlace(v))
+            self.deint_group.addAction(a)
+        deint.addSeparator()
+        deint.addAction(A["deinterlace_toggle"])
+        m.addSeparator()
+        m.addAction(A["screenshot"])
+        m.addAction("Avaa kuvakaappauskansio", self.open_screenshot_folder)
 
         # Soittolista
         m = mb.addMenu("&Soittolista")
@@ -502,6 +706,7 @@ class MainWindow(QMainWindow):
         self.status_action.setChecked(self.settings.value("show_status", True, type=bool))
         self.status_action.toggled.connect(lambda on: self._toggle_panel(self.statusBar(), "show_status", on))
         m.addAction(A["video_only"])
+        m.addAction(A["library_search"])
         m.addSeparator()
         m.addAction(A["fullscreen"])
         self.show_all_action = QAction("Näytä kaikki tiedostot (myös tuntemattomat)", self, checkable=True)
@@ -543,9 +748,318 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, e)
 
     # ============================================================ Teema
+    # ========================================================= Kirjasto
+    def _build_library_panel(self):
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 4, 0, 0)
+        lay.setSpacing(4)
+        self.lib_search = QLineEdit()
+        self.lib_search.setPlaceholderText("Hae artistia, albumia tai kappaletta…")
+        self.lib_search.setClearButtonEnabled(True)
+        self.lib_search.textChanged.connect(lambda _: self.lib_filter_timer.start())
+        self.lib_genre = QComboBox()
+        self.lib_genre.addItem("Kaikki tyylilajit", "")
+        self.lib_genre.currentIndexChanged.connect(lambda _: self.rebuild_library())
+        self.lib_filter_timer = QTimer(self, singleShot=True, interval=200, timeout=self.rebuild_library)
+        self.lib_tree = QTreeWidget()
+        self.lib_tree.setHeaderHidden(True)
+        self.lib_tree.setIndentation(14)
+        self.lib_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.lib_tree.itemDoubleClicked.connect(self._lib_double)
+        self.lib_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.lib_tree.customContextMenuRequested.connect(self._lib_menu)
+        self.lib_status = QLabel("")
+        self.lib_status.setObjectName("pathLabel")
+        self.lib_status.setWordWrap(True)
+        add = self._button("Lisää kansio kirjastoon", self.library_add_folder)
+        add.setText("+ Kansio")
+        add.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        upd = self._button("Päivitä kirjasto (etsi uudet ja muuttuneet tiedostot)", self.library_scan)
+        upd.setText("Päivitä")
+        upd.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        folders = self._button("Kirjaston kansiot", lambda: None)
+        folders.setText("Kansiot ▾")
+        folders.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        folders.setPopupMode(QToolButton.InstantPopup)
+        self.lib_folder_menu = QMenu(folders)
+        self.lib_folder_menu.aboutToShow.connect(self._fill_lib_folders)
+        folders.setMenu(self.lib_folder_menu)
+        row = QHBoxLayout()
+        row.setContentsMargins(4, 0, 4, 0)
+        for w in (add, upd, folders):
+            row.addWidget(w)
+        row.addStretch()
+        for w in (self.lib_search, self.lib_genre):
+            lay.addWidget(w)
+        lay.addWidget(self.lib_tree, 1)
+        lay.addWidget(self.lib_status)
+        lay.addLayout(row)
+        return box
+
+    def library_folders(self):
+        return [f for f in (self.settings.value("library/folders", [], type=list) or []) if f]
+
+    def library_add_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Lisää kansio kirjastoon",
+                                             QStandardPaths.writableLocation(QStandardPaths.MusicLocation))
+        if d:
+            folders = self.library_folders()
+            if d not in folders:
+                folders.append(d)
+                self.settings.setValue("library/folders", folders)
+            self.library_scan()
+
+    def _fill_lib_folders(self):
+        m = self.lib_folder_menu
+        m.clear()
+        folders = self.library_folders()
+        if not folders:
+            m.addAction("Ei kansioita – lisää kansio + Kansio -painikkeella").setEnabled(False)
+        for f in folders:
+            sub = m.addMenu(f)
+            sub.addAction("Poista kirjastosta", lambda f=f: self._remove_lib_folder(f))
+        m.addSeparator()
+        m.addAction("Lisää kansio…", self.library_add_folder)
+
+    def _remove_lib_folder(self, folder):
+        folders = [f for f in self.library_folders() if f != folder]
+        self.settings.setValue("library/folders", folders)
+        self.library_scan()
+
+    def library_scan(self):
+        folders = self.library_folders()
+        if self.scanner and self.scanner.isRunning():
+            return
+        if not folders:
+            self.library_tracks = {}
+            library.save_cache({})
+            self.rebuild_library()
+            return
+        self.lib_status.setText("Päivitetään kirjastoa…")
+        self.scanner = library.LibraryScanner(folders, self)
+        self.scanner.progress.connect(lambda n, d: self.lib_status.setText(f"Luetaan… {n} kappaletta"))
+        self.scanner.finished_scan.connect(self._scan_done)
+        self.scanner.start()
+
+    def _scan_done(self, tracks):
+        self.library_tracks = tracks
+        self.rebuild_library()
+
+    def rebuild_library(self):
+        tracks = self.library_tracks or {}
+        genres = sorted({t.get("genre") for t in tracks.values() if t.get("genre")}, key=str.lower)
+        cur_genre = self.lib_genre.currentData()
+        self.lib_genre.blockSignals(True)
+        self.lib_genre.clear()
+        self.lib_genre.addItem("Kaikki tyylilajit", "")
+        for g in genres:
+            self.lib_genre.addItem(g, g)
+        idx = self.lib_genre.findData(cur_genre)
+        self.lib_genre.setCurrentIndex(max(0, idx))
+        self.lib_genre.blockSignals(False)
+        genre = self.lib_genre.currentData() or ""
+        q = self.lib_search.text().strip().lower()
+        sel = {t["path"]: t for t in tracks.values()
+               if (not genre or t.get("genre") == genre)
+               and (not q or q in " ".join(str(t.get(k, "")) for k in
+                                           ("title", "artist", "album", "albumartist")).lower())}
+        tree = library.group_library(sel)
+        self.lib_tree.clear()
+        bold = self.lib_tree.font()
+        bold.setBold(True)
+        for artist in sorted(tree, key=str.lower):
+            a_item = QTreeWidgetItem(self.lib_tree, [artist])
+            a_item.setFont(0, bold)
+            albums = tree[artist]
+            paths = []
+            for album in sorted(albums, key=lambda al: (albums[al][0].get("year") or "", al.lower())):
+                lst = albums[album]
+                year = lst[0].get("year")
+                al_item = QTreeWidgetItem(a_item, [f"{album}  ({year})" if year else album])
+                al_item.setForeground(0, QColor(self.accent))
+                al_paths = [t["path"] for t in lst]
+                al_item.setData(0, Qt.UserRole, al_paths)
+                paths += al_paths
+                for t in lst:
+                    n = t.get("track")
+                    it = QTreeWidgetItem(al_item, [f"{n:>2}. {t['title']}" if n else t["title"]])
+                    it.setData(0, Qt.UserRole, [t["path"]])
+                    it.setToolTip(0, t["path"])
+            a_item.setData(0, Qt.UserRole, paths)
+            if q:
+                a_item.setExpanded(True)
+        n_alb = sum(len(v) for v in tree.values())
+        if not tracks:
+            self.lib_status.setText("Kirjasto on tyhjä. Lisää musiikkikansio + Kansio -painikkeella.")
+        else:
+            self.lib_status.setText(f"{len(tree)} artistia · {n_alb} albumia · {len(sel)} kappaletta")
+
+    def _lib_paths(self, item):
+        return item.data(0, Qt.UserRole) or []
+
+    def _lib_double(self, item, _col=0):
+        paths = self._lib_paths(item)
+        if not paths:
+            return
+        if len(paths) == 1 and item.parent() is not None:
+            # kappale: toista albumi tästä kappaleesta alkaen
+            album_paths = self._lib_paths(item.parent())
+            self.add_paths(album_paths, replace=True)
+            self.video.cmd("playlist-play-index", album_paths.index(paths[0]))
+        else:
+            item.setExpanded(not item.isExpanded())
+
+    def _lib_menu(self, pos):
+        items = self.lib_tree.selectedItems()
+        paths = [p for it in items for p in self._lib_paths(it)]
+        if not paths:
+            return
+        menu = QMenu(self)
+        menu.addAction("Toista", lambda: self.add_paths(paths, replace=True))
+        menu.addAction("Lisää soittolistaan", lambda: self.add_paths(paths))
+        menu.addAction("Näytä kansiossa", lambda: self.browse(str(Path(paths[0]).parent)) or self.left_tabs.setCurrentIndex(0))
+        menu.exec(self.lib_tree.viewport().mapToGlobal(pos))
+
+    def focus_library_search(self):
+        if not self.library_panel.isVisible():
+            self.lib_action.setChecked(True)
+        self.left_tabs.setCurrentIndex(1)
+        self.lib_search.setFocus()
+        self.lib_search.selectAll()
+
+    # ========================================================= Kuva
+    def open_video_adjust(self):
+        if self.adjust_dialog is None:
+            self.adjust_dialog = videoadjust.VideoAdjustDialog(self.video, self.settings, self)
+        self.adjust_dialog.show()
+        self.adjust_dialog.raise_()
+
+    def set_aspect(self, value, label=None):
+        self.video.set("video-aspect-override", value)
+        for a in self.aspect_group.actions():
+            a.setChecked(a.data() == value)
+        self.video.toast(f"Kuvasuhde: {label or dict(ASPECTS).get(value, value)}")
+
+    def cycle_aspect(self):
+        cur = next((a.data() for a in self.aspect_group.actions() if a.isChecked()), "-1")
+        keys = [k for k, _ in ASPECTS]
+        nxt = keys[(keys.index(cur) + 1) % len(keys)] if cur in keys else keys[0]
+        self.set_aspect(nxt)
+
+    def toggle_fill(self, on=None):
+        if on is None:
+            on = not self.fill_action.isChecked()
+        self.fill_action.blockSignals(True)
+        self.fill_action.setChecked(on)
+        self.fill_action.blockSignals(False)
+        self.video.set("panscan", 1.0 if on else 0.0)
+        self.video.toast("Täytä ruutu: päällä" if on else "Täytä ruutu: pois")
+
+    def set_deinterlace(self, mode):
+        self.video.set("deinterlace", mode)
+        for a in self.deint_group.actions():
+            a.setChecked(a.data() == mode)
+        self.video.toast({"auto": "Lomituksen poisto: automaattinen", "yes": "Lomituksen poisto: päällä",
+                          "no": "Lomituksen poisto: pois"}[mode])
+
+    def toggle_deinterlace(self):
+        cur = next((a.data() for a in self.deint_group.actions() if a.isChecked()), "auto")
+        self.set_deinterlace("no" if cur == "yes" else "yes")
+
+    def rotate_video(self):
+        cur = int(self.video.get("video-rotate", 0) or 0)
+        new = (cur + 90) % 360
+        self.video.set("video-rotate", new)
+        self.video.toast(f"Kierto: {new}°")
+
+    def take_screenshot(self):
+        if not self.is_real_video():
+            self.video.toast("Kuvakaappaus toimii videoille")
+            return
+        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+        self.video.cmd("screenshot", "subtitles")
+        self.video.toast(f"Kuvakaappaus tallennettu: {self.screenshot_dir.name}-kansioon")
+
+    def open_screenshot_folder(self):
+        self.screenshot_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.screenshot_dir)))
+
+    # ========================================================= DVD-kopio
+    def copy_dvd(self, drive=None):
+        if drive is None:
+            dvds = [d for d in list_drives() if d.disc == "dvd"]
+            if not dvds:
+                QMessageBox.information(self, "Kopioi DVD", "Asemassa ei ole DVD-levyä.")
+                return
+            drive = dvds[0]
+        size_mb = disc_size(drive.root) // 2**20
+        dest_parent = QFileDialog.getExistingDirectory(
+            self, f"Minne DVD kopioidaan? ({size_mb} Mt)",
+            QStandardPaths.writableLocation(QStandardPaths.MoviesLocation))
+        if not dest_parent:
+            return
+        dest = unique_folder(dest_parent, safe_name(drive.label))
+        dlg = QProgressDialog("Kopioidaan DVD:tä…", "Peruuta", 0, max(1, size_mb), self)
+        dlg.setWindowTitle("Kopioi DVD")
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        w = DvdCopyWorker(drive.root, dest, self)
+        self.dvd_worker = w
+        w.progress.connect(lambda c, t, f: (dlg.setMaximum(max(1, t)), dlg.setValue(c),
+                                            dlg.setLabelText(f"Kopioidaan {f}…  {c} / {t} Mt")))
+        dlg.canceled.connect(w.abort)
+
+        def done(path):
+            dlg.close()
+            box = QMessageBox(self)
+            box.setWindowTitle("Kopioi DVD")
+            box.setText(f"DVD kopioitu kansioon:\n{path}\n\nVoit toistaa sen tuplaklikkaamalla "
+                        "kansiota tiedostoselaimessa.")
+            box.addButton("OK", QMessageBox.AcceptRole)
+            opn = box.addButton("Avaa kansio", QMessageBox.ActionRole)
+            box.exec()
+            if box.clickedButton() is opn:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+        def failed(msg):
+            dlg.close()
+            QMessageBox.warning(self, "Kopioi DVD", msg)
+
+        w.done.connect(done)
+        w.failed.connect(failed)
+        w.start()
+
+    # ========================================================= Aikajana
+    def _seek_hover(self, t, gpos):
+        self.preview.show_at(fmt_time(t), gpos)
+        path = self.state.get("path") or ""
+        if (self.cfg.get("seek_preview") and self.is_real_video() and "://" not in path
+                and Path(path).suffix.lower() != ".iso"):
+            self._hover = (path, t)
+            self.thumb_timer.start()
+        else:
+            self.preview.set_image(None)
+
+    def _seek_hover_end(self):
+        self._hover = None
+        self.thumb_timer.stop()
+        self.preview.hide()
+
+    def _request_thumb(self):
+        if self._hover:
+            self.thumbs.request(*self._hover)
+
+    def _thumb_ready(self, t, img):
+        if self._hover and self.preview.isVisible():
+            self.preview.set_image(img)
+            self.preview.adjustSize()
+
     def refresh_icons(self):
         a, t = self.accent, theme.TEXT
-        self.setWindowIcon(icon("app", a, 64))
+        ico = ASSETS / "icon.png"
+        self.setWindowIcon(QIcon(str(ico)) if ico.exists() else icon("app", a, 64))
         self.prev_btn.setIcon(icon("prev", t))
         self.next_btn.setIcon(icon("next", t))
         paused = self.state.get("pause") or self.state.get("idle-active", True)
@@ -621,6 +1135,8 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         if not isinstance(d, str) and d.disc:
             menu.addAction("Toista levy", lambda: self.play_disc(d))
+            if d.disc == "dvd":
+                menu.addAction("Kopioi DVD kansioon…", lambda: self.copy_dvd(d))
         path = d if isinstance(d, str) else d.root
         menu.addAction("Toista kaikki (myös alikansiot)", lambda: self.play_folder(path, True))
         menu.addAction("Lisää kaikki soittolistaan", lambda: self.add_folder(path, True))
@@ -862,7 +1378,13 @@ class MainWindow(QMainWindow):
         bold = self.pl_view.font()
         bold.setBold(True)
         for i, e in enumerate(self.playlist):
-            it = QListWidgetItem(f"{i + 1}.  {display_name(e)}")
+            name = display_name(e)
+            fn = e.get("filename", "")
+            if not e.get("title") and i < 500 and "://" not in fn and Path(fn).suffix.lower().lstrip(".") in library.LIB_AUDIO:
+                tg = self._tags(fn)
+                if tg.get("title") and tg["title"] != Path(fn).stem:
+                    name = f"{tg['artist']} – {tg['title']}" if tg.get("artist") else tg["title"]
+            it = QListWidgetItem(f"{i + 1}.  {name}")
             it.setToolTip(e.get("filename", ""))
             if e.get("current"):
                 it.setFont(bold)
@@ -931,6 +1453,11 @@ class MainWindow(QMainWindow):
             self.dur_label.setText(fmt_time(value) if value else "0:00")
         elif name in ("pause", "mute"):
             self.refresh_icons()
+            if name == "mute" and self._ready:
+                self.video.toast("Mykistetty" if value else "Ääni päällä")
+        elif name == "speed":
+            if self._ready and value:
+                self.video.toast(f"Nopeus {value:.2f}×")
             if name == "mute":
                 self.update_audio_info()
         elif name == "idle-active":
@@ -945,6 +1472,7 @@ class MainWindow(QMainWindow):
         elif name == "playlist":
             self.playlist = value or []
             self.rebuild_playlist()
+            self.update_now_playing()
         elif name in ("media-title", "metadata"):
             self.update_now_playing()
         elif name == "chapter-list":
@@ -961,6 +1489,8 @@ class MainWindow(QMainWindow):
             self.vol_slider.setValue(v)
             self.vol_slider.blockSignals(False)
             self.vol_slider.setToolTip(f"Äänenvoimakkuus {v} %")
+            if self._ready:
+                self.video.toast(f"Äänenvoimakkuus {v} %")
             self.update_audio_info()
         elif name == "video-params":
             self.update_now_playing()
@@ -969,6 +1499,9 @@ class MainWindow(QMainWindow):
                     and self.is_real_video()):
                 self._auto_fs_done = True
                 self.toggle_fullscreen()
+        elif name == "audio-params":
+            self.update_audio_info()
+            self.update_now_playing()
         elif name in ("audio-params", "audio-out-params", "audio-codec-name", "current-ao",
                       "af", "audio-exclusive", "video-codec", "hwdec-current"):
             self.update_audio_info()
@@ -1026,6 +1559,7 @@ class MainWindow(QMainWindow):
     # ============================================================ Näkymät
     def show_idle(self):
         self.video.set_show_frame(False)
+        self.video.set_album(None)
         if self.cfg.get("show_hint"):
             self.video.set_info([
                 ("Mediasoitin", 30, self.accent, False),
@@ -1049,12 +1583,13 @@ class MainWindow(QMainWindow):
             return
         title = self.state.get("media-title") or ""
         path = self.state.get("path") or ""
-        if path.startswith("cdtrack://"):
-            title = f"Musiikki-CD – kappale {path.rsplit('/', 1)[-1]}"
+        is_cd = path.startswith("cdtrack://")
+        if is_cd:
+            title = f"Kappale {path.rsplit('/', 1)[-1]}"
         md = self.state.get("metadata") or {}
         low = {str(k).lower(): v for k, v in md.items()}
         artist = low.get("artist") or low.get("album_artist") or ""
-        album = low.get("album") or ""
+        album = low.get("album") or ("Musiikki-CD" if is_cd else "")
         chs = self.state.get("chapter-list") or []
         ch = self.state.get("chapter")
         if len(chs) > 1 and ch is not None and 0 <= ch < len(chs):
@@ -1062,17 +1597,73 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{title} – Mediasoitin" if title else "Mediasoitin")
         self.ov_title.setText(f"{artist} – {title}" if artist else title)
 
-        has_frame = bool((self.state.get("video-params") or {}).get("w"))
-        self.video.set_show_frame(has_frame)
-        if self.is_real_video():
-            self.video.set_info(None)
+        real = self.is_real_video()
+        self.video.set_show_frame(real)
+        self.video.set_info(None)
+        if real:
+            self.video.set_album(None)
             return
-        lines = [(title, 22, "#FFFFFF", False)]
-        if artist:
-            lines.append((artist, 15, self.accent, False))
-        if album:
-            lines.append((album, 12, theme.MUTED, False))
-        self.video.set_info(lines, bottom=has_frame)   # kansikuvan kanssa teksti alareunaan
+        self.video.set_album(self._album_info(path, title, artist, album, is_cd))
+
+    def _tags(self, path):
+        if path not in self.tag_cache:
+            self.tag_cache[path] = self.library_tracks.get(path) or library.read_tags(path)
+        return self.tag_cache[path]
+
+    def _cover(self, path):
+        key = path
+        if key not in self.cover_cache:
+            pm = None
+            try:
+                data = library.find_cover(path)
+                if data:
+                    pm = QPixmap()
+                    pm.loadFromData(data)
+                    if pm.isNull():
+                        pm = None
+                    else:
+                        pm = pm.scaled(800, 800, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            except Exception:
+                pm = None
+            self.cover_cache[key] = pm
+            if len(self.cover_cache) > 200:
+                self.cover_cache.pop(next(iter(self.cover_cache)))
+        return self.cover_cache[key]
+
+    def _album_info(self, path, title, artist, album, is_cd):
+        """Albuminäkymän tiedot: kansikuva, nimet ja saman albumin kappaleet."""
+        info = {"title": title, "artist": artist, "album": album, "cover": None, "tracks": [], "current": -1}
+        local = bool(path) and "://" not in path and Path(path).exists()
+        if local:
+            t = self._tags(path)
+            info["title"] = t.get("title") or title
+            info["artist"] = t.get("artist") or artist
+            al = t.get("album") or album
+            info["album"] = f"{al}  ·  {t['year']}" if al and t.get("year") else al
+            info["cover"] = self._cover(path)
+        ap = self.state.get("audio-params") or {}
+        if ap:
+            codec = (self.state.get("audio-codec-name") or "").upper()
+            info["meta"] = f"{codec}  ·  {ap.get('samplerate', 0) / 1000:g} kHz  ·  {describe_format(ap.get('format'))}"
+        # Kappalelista: soittolistan kappaleet samasta kansiosta (tai koko CD)
+        folder = str(Path(path).parent) if local else None
+        rows, cur = [], -1
+        for e in self.playlist:
+            fn = e.get("filename", "")
+            if is_cd and fn.startswith("cdtrack://"):
+                rows.append((int(fn.rsplit("/", 1)[-1]), f"Kappale {fn.rsplit('/', 1)[-1]}", ""))
+            elif local and "://" not in fn and str(Path(fn).parent) == folder:
+                if len(rows) >= 150:
+                    continue
+                tg = self._tags(fn)
+                rows.append((tg.get("track") or "", tg.get("title") or Path(fn).stem,
+                             fmt_time(tg.get("duration")) if tg.get("duration") else ""))
+            else:
+                continue
+            if e.get("current"):
+                cur = len(rows) - 1
+        info["tracks"], info["current"] = rows, cur
+        return info
 
     def update_audio_info(self):
         ap = self.state.get("audio-params")
@@ -1222,7 +1813,7 @@ class MainWindow(QMainWindow):
         self._fs_confirmed = False
         if self.fullscreen:
             self._was_max = self.isMaximized()
-            self.split_left.hide()
+            self.library_panel.hide()
             self.playlist_panel.hide()
             self.menuBar().hide()
             self.statusBar().hide()
@@ -1238,9 +1829,10 @@ class MainWindow(QMainWindow):
             self.top_ov.hide()
             self.bottom_ov.hide()
             self.video.unsetCursor()
+            self.video.toast_top = 24
             self.central_layout.addWidget(self.controls)  # takaisin ikkunan alareunaan
             self.controls.show()
-            self.split_left.setVisible(self.lib_action.isChecked())
+            self.library_panel.setVisible(self.lib_action.isChecked())
             self.playlist_panel.setVisible(self.pl_action.isChecked())
             self.menuBar().show()
             self.statusBar().setVisible(self.status_action.isChecked())
@@ -1249,20 +1841,27 @@ class MainWindow(QMainWindow):
         self.refresh_icons()
 
     def _place_overlays(self):
+        from PySide6.QtCore import QRect
         w, h = self.video.width(), self.video.height()
         th = self.top_ov.sizeHint().height()
         bh = max(self.controls.sizeHint().height(), 52)
-        self.top_ov.setGeometry(0, 0, w, th)
-        self.bottom_ov.setGeometry(0, h - bh, w, bh)
+        self.top_ov.target = QRect(0, 0, w, th)
+        self.top_ov.at_top = True
+        self.bottom_ov.target = QRect(0, h - bh, w, bh)
+        self.bottom_ov.at_top = False
+        for o in (self.top_ov, self.bottom_ov):
+            if o.shown() and o.anim_pos.state() != QPropertyAnimation.Running:
+                o.setGeometry(o.target)
 
     def _show_overlays(self):
         if not self.fullscreen:
             return
         self._place_overlays()
-        self.top_ov.show()
-        self.bottom_ov.show()
-        self.top_ov.raise_()
-        self.bottom_ov.raise_()
+        anim = self.cfg.get("animations")
+        for o in (self.top_ov, self.bottom_ov):
+            o.slide_in(anim)
+            o.raise_()
+        self.video.toast_top = self.top_ov.target.height() + 14
         self.video.unsetCursor()
         self.hide_timer.start()
 
@@ -1275,8 +1874,11 @@ class MainWindow(QMainWindow):
         if over or QApplication.activePopupWidget() or self.seek_slider.dragging:
             self.hide_timer.start()  # hiiri palkin päällä tai valikko auki: pidetään näkyvissä
             return
-        self.top_ov.hide()
-        self.bottom_ov.hide()
+        anim = self.cfg.get("animations")
+        self.top_ov.slide_out(anim)
+        self.bottom_ov.slide_out(anim)
+        self.video.toast_top = 24
+        self.preview.hide()
         self.video.setCursor(Qt.BlankCursor)  # piilota myös hiiren osoitin
         self.video.setFocus()
 
@@ -1290,7 +1892,7 @@ class MainWindow(QMainWindow):
         if not self.fullscreen:
             return
         self._last_cursor = QCursor.pos()
-        if not self.bottom_ov.isVisible():
+        if not self.bottom_ov.shown():
             self._show_overlays()
         else:
             self.hide_timer.start()
@@ -1319,6 +1921,16 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         if self.fullscreen:
             self.toggle_fullscreen()
+        self.preview.close()
+        if self.adjust_dialog:
+            self.adjust_dialog.close()
+        self.thumbs.stop()
+        if self.scanner and self.scanner.isRunning():
+            self.scanner.abort()
+            self.scanner.wait(2000)
+        if self.dvd_worker and self.dvd_worker.isRunning():
+            self.dvd_worker.abort()
+            self.dvd_worker.wait(3000)
         if self.cfg.get("resume"):
             self.video.cmd("write-watch-later-config")
         self.settings.setValue("geometry", self.saveGeometry())

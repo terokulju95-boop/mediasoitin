@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QOpenGLContext, QPainter
+from PySide6.QtGui import QColor, QFont, QOpenGLContext, QPainter, QPainterPath
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
 
@@ -71,6 +71,10 @@ class MpvWidget(QOpenGLWidget):
         self.render_ctx = None
         self.show_frame = False       # onko mpv:llä kuvaa (video tai kansikuva)
         self.info = None              # (rivit, alhaalla?) tekstinäkymä
+        self.album = None             # albuminäkymä musiikille (dict)
+        self.toast_text = ""          # lyhyt ilmoitus ruudulla
+        self.toast_top = 24           # siirretään alemmas, kun koko näytön yläpalkki on näkyvissä
+        self.toast_timer = QTimer(self, singleShot=True, timeout=self._clear_toast)
         self.accent = QColor("#D35400")
         # Varmistus: pyydetään piirtoa säännöllisesti, ettei kuva jää jumiin esim.
         # koko näytön vaihdon jälkeen (mpv odottaa, että edellinen ruutu piirretään).
@@ -85,7 +89,7 @@ class MpvWidget(QOpenGLWidget):
             gapless_audio="weak",         # saumaton toisto albumeille
             prefetch_playlist="yes",
             replaygain="no",
-            audio_display="embedded-first",
+            audio_display="no",           # kansikuva piirretään itse albuminäkymään
             input_default_bindings="no",
             input_vo_keyboard="no",
             osc="no",
@@ -145,28 +149,38 @@ class MpvWidget(QOpenGLWidget):
         if self.render_ctx is not None and self.show_frame:
             self.render_ctx.render(flip_y=True, opengl_fbo={
                 "w": w, "h": h, "fbo": self.defaultFramebufferObject()})
-            if self.info:
-                self._paint_info(clear=False)
+            clear = False
         else:
-            self._paint_info(clear=True)
-
-    def _paint_info(self, clear):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setRenderHint(QPainter.TextAntialiasing)
-        if clear:
-            p.fillRect(self.rect(), QColor("#000000"))
-        if not self.info:
+            clear = True
+        if clear or self.info or self.toast_text:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setRenderHint(QPainter.TextAntialiasing)
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            if clear:
+                p.fillRect(self.rect(), QColor("#000000"))
+                if self.album:
+                    self._paint_album(p)
+                elif self.info:
+                    self._paint_info(p)
+            elif self.info:
+                self._paint_info(p)
+            if self.toast_text:
+                self._paint_toast(p)
             p.end()
-            return
+
+    def _font(self, size, bold=False):
+        f = QFont(self.font())
+        f.setPointSizeF(size)
+        f.setBold(bold)
+        return f
+
+    def _paint_info(self, p):
         lines, bottom = self.info
         scale = max(0.6, min(1.6, self.height() / 600))
-        metrics = []
-        total = 0
+        metrics, total = [], 0
         for text, size, color, bold in lines:
-            f = QFont(self.font())
-            f.setPointSizeF(size * scale)
-            f.setBold(bold)
+            f = self._font(size * scale, bold)
             p.setFont(f)
             hgt = p.fontMetrics().height() * 1.15
             metrics.append((text, f, color, hgt))
@@ -180,7 +194,107 @@ class MpvWidget(QOpenGLWidget):
             p.drawText(QRectF(20, y, self.width() - 40, hgt), Qt.AlignHCenter | Qt.AlignVCenter,
                        p.fontMetrics().elidedText(text, Qt.ElideRight, self.width() - 40))
             y += hgt
-        p.end()
+
+    def _paint_cover(self, p, rect):
+        path = QPainterPath()
+        path.addRoundedRect(rect, 10, 10)
+        p.save()
+        p.setClipPath(path)
+        cover = self.album.get("cover")
+        if cover is not None and not cover.isNull():
+            pm = cover.scaled(int(rect.width()), int(rect.height()), Qt.KeepAspectRatioByExpanding,
+                              Qt.SmoothTransformation)
+            p.drawPixmap(int(rect.x() - (pm.width() - rect.width()) / 2),
+                         int(rect.y() - (pm.height() - rect.height()) / 2), pm)
+        else:
+            p.fillRect(rect, QColor("#141414"))
+            p.setPen(self.accent)
+            p.setFont(self._font(rect.height() * 0.28))
+            p.drawText(rect, Qt.AlignCenter, "♪")
+        p.restore()
+
+    def _paint_album(self, p):
+        a = self.album
+        W, H = self.width(), self.height()
+        wide = W > 600 and H > 300
+        if wide:
+            size = min(H * 0.62, W * 0.36)
+            x0 = max(30, W * 0.08)
+            cover = QRectF(x0, (H - size) / 2, size, size)
+            tx = cover.right() + 40
+            tw = W - tx - 30
+            ty = cover.top()
+        else:
+            size = min(H * 0.45, W * 0.6)
+            cover = QRectF((W - size) / 2, H * 0.08, size, size)
+            tx, tw, ty = 20, W - 40, cover.bottom() + 16
+        self._paint_cover(p, cover)
+        align = Qt.AlignLeft if wide else Qt.AlignHCenter
+
+        def line(text, size, color, bold=False):
+            nonlocal ty
+            if not text:
+                return
+            p.setFont(self._font(size, bold))
+            p.setPen(QColor(color))
+            hgt = p.fontMetrics().height() * 1.2
+            p.drawText(QRectF(tx, ty, tw, hgt), align | Qt.AlignVCenter,
+                       p.fontMetrics().elidedText(text, Qt.ElideRight, int(tw)))
+            ty += hgt
+
+        line(a.get("title"), 20, "#FFFFFF", True)
+        line(a.get("artist"), 14, self.accent.name())
+        line(a.get("album"), 12, "#BBBBBB")
+        line(a.get("meta"), 9, "#777777")
+        tracks = a.get("tracks") or []
+        if wide and len(tracks) > 1:
+            ty += 14
+            p.setFont(self._font(10))
+            rowh = p.fontMetrics().height() * 1.45
+            room = int((cover.bottom() + 40 - ty) // rowh)
+            cur = a.get("current", -1)
+            start = max(0, min(cur - room // 2, len(tracks) - room)) if room > 0 else 0
+            for i in range(start, min(len(tracks), start + max(room, 0))):
+                num, title, dur = tracks[i]
+                is_cur = i == cur
+                if is_cur:
+                    hl = QColor(self.accent)
+                    hl.setAlpha(45)
+                    p.fillRect(QRectF(tx - 8, ty, tw + 8, rowh), hl)
+                p.setFont(self._font(10, is_cur))
+                p.setPen(self.accent if is_cur else QColor("#8C8C8C"))
+                p.drawText(QRectF(tx, ty, 34, rowh), Qt.AlignVCenter | Qt.AlignRight, str(num or i + 1))
+                p.setPen(QColor("#FFFFFF") if is_cur else QColor("#CFCFCF"))
+                p.drawText(QRectF(tx + 46, ty, tw - 110, rowh), Qt.AlignVCenter | Qt.AlignLeft,
+                           p.fontMetrics().elidedText(title, Qt.ElideRight, int(tw - 110)))
+                p.setPen(QColor("#8C8C8C"))
+                p.drawText(QRectF(tx + tw - 60, ty, 56, rowh), Qt.AlignVCenter | Qt.AlignRight, dur)
+                ty += rowh
+
+    def _paint_toast(self, p):
+        p.setFont(self._font(13, True))
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(self.toast_text) + 36
+        th = fm.height() + 18
+        rect = QRectF(24, self.toast_top, tw, th)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 8, 8)
+        p.fillPath(path, QColor(0, 0, 0, 190))
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(rect, Qt.AlignCenter, self.toast_text)
+
+    def toast(self, text, ms=1400):
+        self.toast_text = text
+        self.toast_timer.start(ms)
+        self.update()
+
+    def _clear_toast(self):
+        self.toast_text = ""
+        self.update()
+
+    def set_album(self, album):
+        self.album = album
+        self.update()
 
     def set_info(self, lines, bottom=False):
         """lines = [(teksti, pistekoko, väri, lihavoitu), ...]; None poistaa."""

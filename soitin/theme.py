@@ -122,6 +122,10 @@ QPushButton:default {{ background: {accent}; border-color: {accent}; }}
 QComboBox {{ background: {SURFACE2}; border: 1px solid {BORDER}; border-radius: 6px; padding: 4px 8px; }}
 QMessageBox, QDialog {{ background: {SURFACE}; }}
 QDialog QWidget {{ background: {SURFACE}; }}
+QWidget#preview {{ background: #000000; border: 1px solid {accent}; border-radius: 6px; }}
+QLabel#previewTime {{ color: {TEXT}; font-weight: bold; background: transparent; padding: 2px 6px; }}
+QTabWidget#leftTabs::pane {{ border: none; }}
+QTabWidget#leftTabs QTabBar::tab {{ padding: 8px 18px; }}
 QCheckBox {{ spacing: 8px; background: transparent; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid #555; border-radius: 4px; background: {BG}; }}
 QCheckBox::indicator:hover {{ border-color: {accent}; }}

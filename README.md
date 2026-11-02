@@ -16,6 +16,15 @@ Toistomoottorina on **mpv (libmpv + FFmpeg)**, joten käytännössä kaikki tied
 - **Saumaton toisto** (gapless) albumeille ja live-levyille.
 - **Paras kuvanlaatu.** Käytössä on mpv:n *high-quality*-profiili ja laitteistopurku, joka ei heikennä kuvaa.
 - **Selkeä musta OLED-teema** korostusvärillä (oletus tumma oranssi). Värin voi vaihtaa sovelluksessa.
+- **Albuminäkymä:** musiikkia soitettaessa näkyy iso kansikuva, kappaleen tiedot ja albumin kappalelista. Kansikuva luetaan tiedostosta tai kansion `cover.jpg`- tai `folder.jpg`-tiedostosta.
+- **Musiikkikirjasto** (Kirjasto-välilehti): valitse musiikkikansiot, niin voit selata artistin ja albumin mukaan, suodattaa tyylilajilla ja hakea nimellä (Ctrl + F).
+- **Kuvan säädöt** (Ctrl + E): kirkkaus, kontrasti, värikylläisyys, gamma ja sävy sekä oletusten palautus.
+- **Kuvasuhde ja rajaus:** 16:9, 4:3, 21:9 ym. "Täytä ruutu" (Z) poistaa mustat reunat. Lisäksi kierto 90°.
+- **Kuvakaappaus** (Ctrl + S) Kuvat\Mediasoitin-kansioon.
+- **Lomituksen poisto** vanhoille DVD- ja TV-tallenteille (automaattinen, päällä tai pois).
+- **Aikajanan esikatselu:** hiiren alla näkyy aika, ja videossa pieni esikatselukuva.
+- **Ilmoitukset ruudulla:** äänenvoimakkuus, kelaus, kuvasuhde, ääniraita ja tekstitys näkyvät hetken kuvan päällä.
+- **DVD:n kopiointi kansioksi** suojaamattomille levyille (omat kotivideot, itse poltetut levyt).
 - **Asetukset-ikkuna** (*Tiedosto → Asetukset*, Ctrl + ,): pikanäppäimet, kelausajat, äänenvoimakkuuden askel, hiiren toiminnot, kuvanlaatu, tekstitykset, ääniraidan kieli, "jatka siitä mihin jäit" ja ulkoasu.
 - **Muokattava näkymä:** lähteet, soittolista ja tilarivi voi näyttää tai piilottaa, ja paneelien koon voi säätää vetämällä. Asetukset muistetaan.
 - **Koko näyttö ilman häiriöitä:** palkit katoavat, kun hiiri on paikallaan, ja tulevat esiin, kun hiirtä liikuttaa.
@@ -111,11 +120,22 @@ soitin/theme.py         värit ja tyylit (helppo muokata)
 soitin/icons.py         piirretyt kuvakkeet
 soitin/player.py        mpv-moottori, video piirretään sovelluksen OpenGL-näkymään
 soitin/settings.py      asetusten oletusarvot, pikanäppäinlista ja asetusikkuna
+soitin/library.py       musiikkikirjasto, tagit ja kansikuvat (mutagen)
+soitin/preview.py       aikajanan esikatselukuvat
+soitin/videoadjust.py   kuvan säädöt
+soitin/dvdcopy.py       DVD:n kopiointi kansioksi
+soitin/assets/          sovelluskuvake
 soitin/cdaudio.py       musiikki-CD:n suora digitaalinen luku (Windows)
 soitin/drives.py        asemien tunnistus (kiintolevy, USB, CD/DVD)
 soitin/media.py         tiedostotyypit ja apufunktiot
 tools/hae_libmpv.ps1    libmpv:n lataus
 ```
+
+### DVD:n kopiointi
+
+*Tiedosto → Kopioi DVD kansioon…* (tai hiiren oikea DVD:n kohdalla Lähteet-luettelossa) kopioi levyn VIDEO_TS-kansion valitsemaasi paikkaan. Kopion voi toistaa tuplaklikkaamalla kansiota.
+
+Kopiointi toimii **suojaamattomille levyille**, kuten omille kotivideoille ja itse poltetuille DVD-levyille. Kaupallisten elokuvalevyjen kopiosuojausta (CSS) ei pureta: kopiointi keskeytyy ja soitin kertoo syyn. Suomen tekijänoikeuslaki kieltää kopiosuojauksen kiertämisen myös yksityiskäytössä. Suojattuja levyjä voi silti katsoa soittimella normaalisti.
 
 ## Rajoitukset
 
