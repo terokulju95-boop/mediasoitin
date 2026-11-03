@@ -245,6 +245,7 @@ class SettingsDialog(QDialog):
         f.addRow("", self._note("Paras laatu käyttää tarkinta skaalausta ja poistaa raidoittumista. "
                                 "Jos video nykii vanhalla koneella, valitse Normaali tai Nopea."))
         f.addRow("", self._check("hwdec", "Laitteistopurku (näytönohjain purkaa videon, kuvanlaatu sama)"))
+        f.addRow("", self._note("Värit, tarkennus vanhoille videoille ja HDR-säädöt: Kuva → Kuvan säädöt (Ctrl + E)."))
         return page
 
     def _tab_subs(self):
@@ -252,6 +253,7 @@ class SettingsDialog(QDialog):
         f.addRow("Tekstityksen kielet:", self._line("slang", "esim. fin,fi,eng,en"))
         f.addRow("Tekstin koko:", self._spin("sub_scale", 0.5, 3.0, " ×", 2, 0.1))
         f.addRow("", self._check("sub_auto", "Lataa samannimiset tekstitystiedostot automaattisesti (.srt, .ass…)"))
+        f.addRow("", self._note("Fontti, värit, reunus, tausta ja korkeus: Tekstitys → Tekstitysten ulkoasu…"))
         return page
 
     def _tab_keys(self):

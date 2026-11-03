@@ -1,0 +1,8 @@
+Kuvan tarkennussävyttimet (mpv user shaders)
+
+ravu-lite-ar-r4.hook, nnedi3-nns32-win8x4.hook
+  Lähde: https://github.com/bjin/mpv-prescalers (bjin)
+  Lisenssi: GNU LGPL v3, ks. LICENSE-mpv-prescalers.txt
+
+terava-kevyt.glsl, terava-voimakas.glsl
+  Mediasoittimen oma mukautuva terävöitys.

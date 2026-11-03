@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import __version__, cdaudio, library, theme, updater, videoadjust
+from . import __version__, cdaudio, library, subtitles, theme, updater, videoadjust
 from .radio import RadioPanel
 from .remote import RemoteDialog, RemoteServer
 from .dvdcopy import DvdCopyWorker, disc_size, safe_name, unique_folder
@@ -268,6 +268,9 @@ class MainWindow(QMainWindow):
         self.video.set("screenshot-format", "png")
         self.video.set("screenshot-template", "%F %wH.%wM.%wS")
         videoadjust.apply_saved(self.video, self.settings)
+        subtitles.apply(self.video, self.settings)
+        self.sub_dialog = None
+        self._shaders = []
         self.video.set("deinterlace", "auto")   # vanhemmissa mpv-versioissa jää oletukseen
         self.adjust_dialog = None
         self.tag_cache = {}             # polku -> tagit (albuminäkymä)
@@ -675,6 +678,8 @@ class MainWindow(QMainWindow):
         # Kuva
         m = mb.addMenu("&Kuva")
         m.addAction(A["video_adjust"])
+        m.addAction("Tarkennus vanhoille videoille…", lambda: self.open_video_adjust(1))
+        m.addAction("HDR-säädöt…", lambda: self.open_video_adjust(2))
         asp = m.addMenu("Kuvasuhde")
         self.aspect_group = QActionGroup(self)
         for value, label in ASPECTS:
@@ -751,6 +756,7 @@ class MainWindow(QMainWindow):
         m.addAction(A["sub_toggle"])
         m.addAction(A["sub_cycle"])
         m.addAction("Lataa tekstitystiedosto…", self.load_subtitle)
+        m.addAction("Tekstitysten ulkoasu…", self.open_sub_style)
         m.addSeparator()
         m.addAction("Suurempi teksti", lambda: self.video.cmd("add", "sub-scale", 0.1))
         m.addAction("Pienempi teksti", lambda: self.video.cmd("add", "sub-scale", -0.1))
@@ -997,11 +1003,30 @@ class MainWindow(QMainWindow):
         self.lib_search.selectAll()
 
     # ========================================================= Kuva
-    def open_video_adjust(self):
+    def open_video_adjust(self, tab=0):
         if self.adjust_dialog is None:
-            self.adjust_dialog = videoadjust.VideoAdjustDialog(self.video, self.settings, self)
+            self.adjust_dialog = videoadjust.VideoAdjustDialog(self.video, self.settings, self.update_shaders, self)
+        self.adjust_dialog.tabs.setCurrentIndex(tab)
         self.adjust_dialog.show()
         self.adjust_dialog.raise_()
+
+    def update_shaders(self):
+        """Tarkennussävyttimet päälle vain videoille, jotka hyötyvät niistä (esim. DVD/SD)."""
+        vp = self.state.get("video-params") if self.is_real_video() else None
+        want = videoadjust.wanted_shaders(self.settings, vp)
+        if want == self._shaders:
+            return
+        self._shaders = want
+        self.video.cmd("change-list", "glsl-shaders", "clr", "")
+        for path in want:
+            self.video.cmd("change-list", "glsl-shaders", "append", path)
+        self.update_audio_info()
+
+    def open_sub_style(self):
+        if self.sub_dialog is None:
+            self.sub_dialog = subtitles.SubStyleDialog(self.video, self.settings, self)
+        self.sub_dialog.show()
+        self.sub_dialog.raise_()
 
     def set_aspect(self, value, label=None):
         self.video.set("video-aspect-override", value)
@@ -1782,6 +1807,7 @@ class MainWindow(QMainWindow):
             self.update_now_playing()
         elif name == "track-list":
             self.rebuild_track_menus(value or [])
+            self.update_shaders()
             self.update_now_playing()
         elif name == "volume":
             v = int(round(value or 0))
@@ -1793,6 +1819,9 @@ class MainWindow(QMainWindow):
                 self.video.toast(f"Äänenvoimakkuus {v} %")
             self.update_audio_info()
         elif name == "video-params":
+            self.update_shaders()
+            if self.adjust_dialog is not None and self.adjust_dialog.isVisible():
+                self.adjust_dialog.refresh_info()
             self.update_now_playing()
             self.update_audio_info()
             if self.is_real_video() and not self.cfg.get("auto_next"):
@@ -1991,7 +2020,9 @@ class MainWindow(QMainWindow):
             vc = (self.state.get("video-codec") or "").split(" ")[0]
             s = f"{vc}  {vp.get('w')}×{vp.get('h')}"
             if vp.get("gamma") in ("pq", "hlg"):
-                s += "  HDR"
+                s += "  HDR → SDR"
+            if self._shaders:
+                s += "  ·  AI-tarkennus" if any("ravu" in x or "nnedi" in x for x in self._shaders) else "  ·  terävöitys"
             parts.append(s)
         self.format_label.setText("     │     ".join(parts))
 
@@ -2237,6 +2268,8 @@ class MainWindow(QMainWindow):
         self.preview.close()
         if self.adjust_dialog:
             self.adjust_dialog.close()
+        if self.sub_dialog:
+            self.sub_dialog.close()
         self.thumbs.stop()
         self.remote.stop()
         if self.scanner and self.scanner.isRunning():
