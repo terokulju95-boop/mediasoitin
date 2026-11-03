@@ -63,8 +63,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
+      # Android SDK on valmiiksi asennettuna GitHubin Linux-koneissa (ANDROID_HOME).
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
@@ -99,7 +98,13 @@ jobs:
         run: |
           v=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' soitin/__init__.py)
           if gh release view "v$v" >/dev/null 2>&1; then
-            echo "Versio v$v on jo julkaistu - ei uutta julkaisua."
+            # Versio on jo julkaistu: lisätään Android-sovellus, jos se puuttuu tai on korjattu.
+            if [ -f dist/Mediasoitin-kaukosaadin.apk ]; then
+              gh release upload "v$v" dist/Mediasoitin-kaukosaadin.apk --clobber
+              echo "Android-sovellus lisätty julkaisuun v$v."
+            else
+              echo "Versio v$v on jo julkaistu - ei muutoksia."
+            fi
             exit 0
           fi
           files="dist/Mediasoitin-windows-x64.zip"
