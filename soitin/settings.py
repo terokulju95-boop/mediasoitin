@@ -25,6 +25,7 @@ DEFAULTS = {
     "auto_next": True,           # seuraava jakso automaattisesti
     "next_offer": 20,            # s ennen loppua: "Seuraava jakso" -kortti (lopputekstien ohitus)
     "next_countdown": 10,        # s laskuri kortissa
+    "intro_mode": "button",      # off / button / auto  (alkutunnarin ohitus)
     # Muut
     "check_updates": True,
     "remote_enabled": False,
@@ -86,6 +87,7 @@ ACTIONS = [
     ("library_search", "Hae kirjastosta", "Ctrl+F", "Näkymä"),
     ("remote", "Kaukosäädin puhelimesta", "Ctrl+K", "Näkymä"),
     ("next_episode_now", "Seuraava jakso heti (ohita lopputekstit)", "N", "Toisto"),
+    ("skip_intro", "Ohita alkutunnari", "I", "Toisto"),
     ("open_files", "Avaa tiedostoja", "Ctrl+O", "Tiedosto"),
     ("open_folder", "Avaa kansio", "Ctrl+Shift+O", "Tiedosto"),
     ("remove_selected", "Poista valitut soittolistasta", "Delete", "Tiedosto"),
@@ -222,6 +224,12 @@ class SettingsDialog(QDialog):
         f.addRow("Laskuri ennen seuraavaa jaksoa:", self._spin("next_countdown", 3, 60, " s"))
         f.addRow("", self._note("Kortin avulla lopputekstit voi ohittaa. Jos lopputekstit ovat pitkät, "
                                 "kasvata ensimmäistä aikaa (esim. 60–90 s)."))
+        f.addRow("Alkutunnari:", self._combo("intro_mode", [
+            ("button", "Näytä “Ohita alkutunnari” -painike"),
+            ("auto", "Ohita automaattisesti"),
+            ("off", "Pois (ei tunnistusta)")]))
+        f.addRow("", self._note("Tunnari tunnistetaan jakson luvuista tai vertaamalla saman kansion jaksojen ääntä. "
+                                "Jos ohitus osuu väärään kohtaan, valitse Pois."))
         return page
 
     def _tab_audio(self):

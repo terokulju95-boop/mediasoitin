@@ -15,6 +15,31 @@ SERVERS = ["https://de1.api.radio-browser.info", "https://fi1.api.radio-browser.
 USER_AGENT = b"Mediasoitin/1.4"
 
 
+def search_stations(query="", limit=120):
+    """Hakee asemia radio-browser.info:sta (ei Qt:ta, käytetään kaukosäätimen palvelimelta).
+    Tyhjä haku = suosituimmat suomalaiset asemat."""
+    import urllib.request
+    params = ({"name": query, "hidebroken": "true", "order": "clickcount", "reverse": "true", "limit": limit}
+              if query else {"countrycode": "FI", "hidebroken": "true", "order": "clickcount",
+                             "reverse": "true", "limit": limit})
+    for server in SERVERS:
+        try:
+            req = urllib.request.Request(f"{server}/json/stations/search?{urlencode(params)}",
+                                         headers={"User-Agent": USER_AGENT.decode()})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            seen, out = set(), []
+            for d in data:
+                st = RadioPanel._station(d)
+                if st["url"] and st["name"] and st["name"].lower() not in seen:
+                    seen.add(st["name"].lower())
+                    out.append(st)
+            return out
+        except Exception:
+            continue
+    return None
+
+
 class StationDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)

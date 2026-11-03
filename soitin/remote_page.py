@@ -57,12 +57,33 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
 .type{display:flex;gap:8px;margin:12px}
 .type input{flex:1;background:#0d0d0d;border:1px solid var(--b);color:var(--t);border-radius:12px;padding:12px;font-size:16px}
 .type .btn{border-radius:12px;width:auto;padding:0 18px;height:auto;background:var(--a);color:#fff}
+.seg{display:flex;margin:10px 12px;background:#111;border-radius:12px;padding:3px}
+.seg button{all:unset;flex:1;text-align:center;padding:9px;border-radius:9px;color:var(--m);font-size:14px}
+.seg button.on{background:#262626;color:var(--t)}
+.crumb{display:flex;align-items:center;gap:8px;margin:4px 12px 6px}
+.crumb .t{flex:1;font-weight:700;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crumb button{all:unset;background:#161616;border-radius:10px;padding:8px 12px;font-size:14px;color:var(--t)}
+.crumb button.play{background:var(--a);color:#fff}
+.search{display:block;width:calc(100% - 24px);margin:6px 12px;background:#0d0d0d;border:1px solid var(--b);color:var(--t);
+ border-radius:12px;padding:11px 12px;font-size:16px;box-sizing:border-box}
+.it{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #141414}
+.it:active{background:#111}
+.it .ic{width:26px;text-align:center;font-size:18px;flex:0 0 auto}
+.it .nm{flex:1;min-width:0}
+.it .nm div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.it .nm small{color:var(--m);font-size:12px}
+.it .side{color:var(--m);font-size:13px;flex:0 0 auto}
+.star{all:unset;font-size:22px;padding:4px 6px;color:var(--m)}
+.star.on{color:var(--a)}
+.subh{color:var(--m);font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:14px 16px 4px}
+#toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);background:#222;color:#fff;padding:10px 16px;
+ border-radius:20px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:8}
 #off{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);align-items:center;justify-content:center;
  text-align:center;padding:30px;color:var(--m);line-height:1.5;z-index:9}
 </style></head><body>
 <div id="app">
 <header><span>Mediasoitin</span><button id="forget" style="display:none" onclick="Android.forget()">Vaihda tietokone</button></header>
-<main>
+<main id="main">
  <section class="page on" id="p-play">
   <div id="cover">♪</div>
   <div id="title">–</div>
@@ -82,10 +103,22 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
    <button class="btn pill" onclick="cmd('fullscreen')">⛶ Koko näyttö</button>
    <button class="btn pill" onclick="cmd('stop')">■ Pysäytä</button>
    <button class="btn pill" id="nextep" style="display:none" onclick="cmd('next_episode')">⏭ Seuraava jakso</button>
+   <button class="btn pill" id="skipintro" style="display:none;background:var(--a);color:#fff" onclick="cmd('skip_intro')">⏭ Ohita alkutunnari</button>
   </div>
  </section>
  <section class="page" id="p-list"><div id="list"></div></section>
- <section class="page" id="p-radio"><div id="radio"></div></section>
+ <section class="page" id="p-browse">
+  <div class="seg"><button id="segF" class="on" onclick="setMode('f')">Kansiot</button><button id="segL" onclick="setMode('l')">Kirjasto</button></div>
+  <div class="crumb"><button id="bUp" onclick="up()">‹ Takaisin</button><div class="t" id="bTitle">Tietokone</div>
+   <button class="play" id="bPlay" onclick="playHere()">▶ Toista</button></div>
+  <input id="bFilter" class="search" placeholder="Suodata…" autocomplete="off">
+  <div id="bList"></div>
+ </section>
+ <section class="page" id="p-radio">
+  <input id="rq" class="search" placeholder="Hae asemaa (esim. Yle, Nova, jazz)…" autocomplete="off" enterkeyhint="search">
+  <div class="subh">Suosikit</div><div id="radio"></div>
+  <div class="subh" id="rhead">Suomalaiset asemat</div><div id="rres"></div>
+ </section>
  <section class="page" id="p-pad">
   <div id="pad">Liikuta sormea: hiiri<br>Napauta: klikkaus · Kahdella sormella: rullaus<br>Kahden sormen napautus: oikea klikkaus</div>
   <div class="keys">
@@ -102,20 +135,83 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
 <nav>
  <button class="on" data-p="p-play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>Toisto</button>
  <button data-p="p-list"><svg viewBox="0 0 24 24"><path d="M3 6h13v2H3zm0 5h13v2H3zm0 5h9v2H3zm15-5v8.2A3 3 0 1 0 20 22V13h2v-2z"/></svg>Soittolista</button>
+ <button data-p="p-browse"><svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8z"/></svg>Selaa</button>
  <button data-p="p-radio"><svg viewBox="0 0 24 24"><path d="M4 8h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1zm3 9a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zm6-4v2h6v-2zm-6.6-6.1L16.7 3l.7 1.9L8.6 8z"/></svg>Radio</button>
  <button data-p="p-pad"><svg viewBox="0 0 24 24"><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm0 2v9h14V5zm0 11v3h6.5v-3zm8 0v3H19v-3z"/></svg>Hiiri</button>
 </nav>
 </div>
+<div id="toast"></div>
 <div id="off">Yhteys soittimeen katkesi.<br><br>Onko soitin auki ja puhelin samassa wifissä?</div>
 <script>
 const P=new URLSearchParams(location.search),K=P.get('k');
 const $=id=>document.getElementById(id);
 let st={},dragging=false,volDrag=false,lastCover=null,fails=0;
 if(window.Android){$('forget').style.display='block'}
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
- document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
- document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===b.dataset.p));
- $('txt').blur()});
+function tab(id){document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.p===id));
+ document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id));$('txt').blur();
+ if(id==='p-browse'&&!B.loaded)load('');if(id==='p-radio'&&!R.loaded)radioSearch('')}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.p));
+let toastT=0;function toast(t){const e=$('toast');e.textContent=t;e.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>e.style.opacity=0,1600)}
+function esc(t){return String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+async function api(path){const r=await fetch(path+(path.includes('?')?'&':'?')+'k='+K,{cache:'no-store'});return r.json()}
+// ---- selaus
+const B={mode:'f',loaded:false,path:'',parent:null,items:[],lib:null,artist:null,album:null};
+const ICON={dir:'📁',drive:'💽',disc:'💿',video:'🎬',audio:'🎵',list:'📃'};
+function setMode(m){B.mode=m;$('segF').classList.toggle('on',m==='f');$('segL').classList.toggle('on',m==='l');
+ $('bFilter').value='';if(m==='f')load(B.path);else libLoad()}
+function row(icon,name,sub,side,onTap,onHold){const d=document.createElement('div');d.className='it';
+ d.innerHTML=`<div class="ic">${icon}</div><div class="nm"><div>${esc(name)}</div>${sub?`<small>${esc(sub)}</small>`:''}</div>${side?`<div class="side">${esc(side)}</div>`:''}`;
+ d.onclick=onTap;if(onHold)d.oncontextmenu=e=>{e.preventDefault();onHold()};return d}
+function render(){const L=$('bList'),f=$('bFilter').value.trim().toLowerCase();L.innerHTML='';
+ const items=B.items.filter(x=>!f||x.label.toLowerCase().includes(f));
+ if(!items.length){L.innerHTML='<div class="empty">'+(B.mode==='l'&&!B.lib?.artists?.length?'Kirjasto on tyhjä.<br>Lisää musiikkikansio soittimen Kirjasto-välilehdellä.':'Ei sisältöä.')+'</div>';return}
+ items.forEach(x=>L.appendChild(row(x.icon,x.label,x.sub,x.side,x.tap,x.hold)))}
+async function load(path){B.loaded=true;B.mode='f';$('bTitle').textContent='Ladataan…';
+ let d;try{d=await api('/api/browse?path='+encodeURIComponent(path))}catch(e){toast('Ei yhteyttä');return}
+ if(d.error){toast(d.error);return}
+ B.path=d.path;B.parent=d.parent;$('bTitle').textContent=d.title;$('bUp').style.visibility=d.parent===null?'hidden':'visible';
+ $('bPlay').style.display=d.path?'block':'none';$('bFilter').value='';
+ B.items=d.items.map(x=>({icon:ICON[x.type]||'📄',label:x.name,
+  tap:()=>{if(x.type==='dir'||(x.type==='drive'))load(x.path);else if(x.type==='disc'){cmd('play_path',{path:x.path});tab('p-play')}
+   else{cmd('play_path',{path:x.path});toast('Toistetaan');tab('p-play')}},
+  hold:x.type==='dir'||x.type==='drive'?null:()=>{cmd('queue_path',{path:x.path});toast('Lisätty soittolistaan')}}));
+ render();$('main').scrollTop=0}
+async function libLoad(){B.loaded=true;if(!B.lib){$('bTitle').textContent='Ladataan…';try{B.lib=await api('/api/library')}catch(e){toast('Ei yhteyttä');return}}
+ B.artist=null;B.album=null;libRender()}
+function libRender(){$('bFilter').value='';const A=B.lib.artists||[];
+ if(!B.artist){$('bTitle').textContent='Artistit';$('bUp').style.visibility='hidden';$('bPlay').style.display='none';
+  B.items=A.map(a=>({icon:'👤',label:a.name,side:a.albums.length+' alb.',tap:()=>{B.artist=a;libRender()}}))}
+ else if(!B.album){const a=B.artist;$('bTitle').textContent=a.name;$('bUp').style.visibility='visible';$('bPlay').style.display='none';
+  B.items=a.albums.map(al=>({icon:'💿',label:al.name,sub:[al.year,al.count+' kappaletta'].filter(Boolean).join(' · '),tap:()=>openAlbum(a.name,al.name)}))}
+ render();$('main').scrollTop=0}
+async function openAlbum(artist,album){let d;try{d=await api('/api/album?artist='+encodeURIComponent(artist)+'&album='+encodeURIComponent(album))}catch(e){return}
+ B.album=d;$('bTitle').textContent=album;$('bUp').style.visibility='visible';$('bPlay').style.display='block';
+ const paths=d.tracks.map(t=>t.path);
+ B.items=d.tracks.map((t,i)=>({icon:'🎵',label:(t.track?t.track+'. ':'')+t.title,side:t.dur,
+  tap:()=>{cmd('play_paths',{paths,index:i});toast('Toistetaan');tab('p-play')},hold:()=>{cmd('queue_path',{path:t.path});toast('Lisätty soittolistaan')}}));
+ render();$('main').scrollTop=0}
+function up(){if(B.mode==='f'){if(B.parent!==null)load(B.parent)}else{if(B.album){B.album=null;libRender()}else if(B.artist){B.artist=null;libRender()}}}
+function playHere(){if(B.mode==='f'){if(B.path){cmd('play_path',{path:B.path});toast('Toistetaan kansio');tab('p-play')}}
+ else if(B.album){cmd('play_paths',{paths:B.album.tracks.map(t=>t.path),index:0});toast('Toistetaan albumi');tab('p-play')}}
+$('bFilter').addEventListener('input',render);
+// ---- radio
+const R={loaded:false,results:[]};let rT=0;
+function isFav(url){return (st.radio_favs||[]).some(f=>f.url===url)}
+function starBtn(stn){const b=document.createElement('button');b.className='star'+(isFav(stn.url)?' on':'');b.textContent=isFav(stn.url)?'★':'☆';
+ b.onclick=e=>{e.stopPropagation();const was=isFav(stn.url);cmd('radio_fav',stn);toast(was?'Poistettu suosikeista':'Lisätty suosikkeihin');
+  b.classList.toggle('on',!was);b.textContent=was?'☆':'★'};return b}
+function renderRadio(){const F=$('radio');F.innerHTML='';const favs=st.radio_favs||[];
+ if(!favs.length)F.innerHTML='<div class="empty" style="padding:14px">Ei suosikkeja vielä. Lisää ☆-tähdellä.</div>';
+ favs.forEach(f=>{const d=row('📻',f.name,'',null,()=>{cmd('radio_play',f);toast('Kuunnellaan '+f.name);tab('p-play')});d.appendChild(starBtn(f));F.appendChild(d)});
+ const Rr=$('rres');Rr.innerHTML='';R.results.forEach(s=>{const d=row('📻',s.name,[s.info,s.country&&s.country!=='FI'?s.country:''].filter(Boolean).join(' · '),null,
+  ()=>{cmd('radio_play',s);toast('Kuunnellaan '+s.name);tab('p-play')});d.appendChild(starBtn(s));Rr.appendChild(d)})}
+async function radioSearch(q){R.loaded=true;$('rhead').textContent=q?'Hakutulokset: '+q:'Suomalaiset asemat';
+ $('rres').innerHTML='<div class="empty" style="padding:14px">Haetaan…</div>';
+ let d;try{d=await api('/api/radio?q='+encodeURIComponent(q))}catch(e){d={error:'Ei yhteyttä'}}
+ if(d.error){$('rres').innerHTML='<div class="empty" style="padding:14px">'+esc(d.error)+'</div>';return}
+ R.results=d;renderRadio()}
+$('rq').addEventListener('input',()=>{clearTimeout(rT);const q=$('rq').value.trim();rT=setTimeout(()=>radioSearch(q.length>=2?q:''),600)});
+$('rq').addEventListener('keydown',e=>{if(e.key==='Enter'){clearTimeout(rT);radioSearch($('rq').value.trim());$('rq').blur()}});
 function fmt(s){if(s==null||s<0)return'0:00';s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
  return h?`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${m}:${String(x).padStart(2,'0')}`}
 async function cmd(c,v){try{await fetch('/api/cmd?k='+K,{method:'POST',body:JSON.stringify({cmd:c,value:v})});
@@ -137,14 +233,14 @@ async function poll(){
  if(!volDrag)$('vol').value=st.volume??100;
  $('mute').textContent=st.mute?'🔇':'🔊';
  $('nextep').style.display=st.has_next_episode?'flex':'none';
+ $('skipintro').style.display=st.intro_active?'flex':'none';
  $('pi').innerHTML=st.paused?'<path d="M8 5v14l11-7z"/>':'<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>';
  const coverSig=(st.cover_id||'')+'|'+(st.video?1:0);
  if(coverSig!==lastCover){lastCover=coverSig;
   if(st.cover_id){$('cover').style.backgroundImage=`url(/api/cover?k=${K}&v=${st.cover_id})`;$('cover').textContent=''}
   else{$('cover').style.backgroundImage='';$('cover').textContent=st.video?'▶':'♪'}}
  list($('list'),(st.playlist||[]).map((n,i)=>(i+1)+'. '+n),st.current,i=>cmd('play_index',i),'Soittolista on tyhjä.');
- list($('radio'),(st.radio||[]).map(n=>'★  '+n),-1,i=>cmd('play_radio',i),
-  'Ei suosikkiradioita.<br>Lisää asemia suosikeiksi soittimen Radio-välilehdellä (hiiren oikea → Lisää suosikiksi).');
+ const favSig=JSON.stringify(st.radio_favs||[]);if(R.favSig!==favSig){R.favSig=favSig;renderRadio()}
 }
 $('seek').addEventListener('input',()=>{dragging=true;$('pos').textContent=fmt(st.dur*$('seek').value/1000)});
 $('seek').addEventListener('change',()=>{cmd('seek_abs',st.dur*$('seek').value/1000);dragging=false});

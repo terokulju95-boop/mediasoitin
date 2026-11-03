@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import __version__, cdaudio, library, subtitles, theme, updater, videoadjust
+from . import __version__, cdaudio, intro, library, subtitles, theme, updater, videoadjust
 from .radio import RadioPanel
 from . import inputsim
 from .remote import PairCodeDialog, RemoteDialog, RemoteServer
@@ -23,8 +23,9 @@ from .dvdcopy import DvdCopyWorker, disc_size, safe_name, unique_folder
 from .preview import ThumbnailWorker
 from .drives import NETWORK, OPTICAL, REMOVABLE, list_drives, quick_locations
 from .icons import icon
-from .media import (NAME_FILTERS, cda_track_number, describe_format, display_name,
-                    fmt_time, media_in_folder, natural_key)
+from .media import (AUDIO_EXT, NAME_FILTERS, PLAYLIST_EXT, cda_track_number, describe_format,
+                    display_name, fmt_time, is_media, media_in_folder, natural_key)
+from .radio import search_stations
 from .player import MpvWidget
 from .settings import ACTIONS, Config, SettingsDialog
 
@@ -290,11 +291,20 @@ class MainWindow(QMainWindow):
         self.thumb_timer = QTimer(self, singleShot=True, interval=90, timeout=self._request_thumb)
         self.radio_names = {}           # striimin osoite -> aseman nimi
         self._next_state = "idle"       # idle / counting / dismissed
+        self._intro = None              # (alku, loppu) nykyiselle jaksolle
+        self._intro_path = ""
+        self._intro_skipped = False
+        self._intro_scanner = None
         self._next_left = 0
         self.next_timer = QTimer(self, interval=1000, timeout=self._next_tick)
         self.remote = RemoteServer(self)
         self.remote.command.connect(self.on_remote_command)
         self.remote.pair_requested.connect(self._show_pair_code)
+        self._root_items = []
+        self.remote.providers = {
+            "browse": self._api_browse, "library": self._api_library, "album": self._api_album,
+            "radio_search": lambda q: search_stations(q.strip()) or {"error": "Asemahaku ei onnistunut."},
+        }
         self.remote.pair_finished.connect(self._pair_done)
         self.pair_dialog = None
         self.remote_dialog = None
@@ -607,6 +617,7 @@ class MainWindow(QMainWindow):
             "deinterlace_toggle": self.toggle_deinterlace, "rotate": self.rotate_video,
             "library_search": self.focus_library_search,
             "remote": self.open_remote, "next_episode_now": self.next_episode_now,
+            "skip_intro": self.skip_intro,
             "fullscreen": self.toggle_fullscreen, "fullscreen_alt": self.toggle_fullscreen,
             "exit_fullscreen": lambda: self.fullscreen and self.toggle_fullscreen(),
             "toggle_library": lambda: self.lib_action.toggle(),
@@ -1161,17 +1172,96 @@ class MainWindow(QMainWindow):
 
     # ========================================================= Seuraava jakso
     def _build_next_card(self):
+        self.intro_btn = QToolButton(self.video)
+        self.intro_btn.setObjectName("nextNow")
+        self.intro_btn.setText("⏭  Ohita alkutunnari")
+        self.intro_btn.setCursor(Qt.PointingHandCursor)
+        self.intro_btn.setFocusPolicy(Qt.NoFocus)
+        self.intro_btn.clicked.connect(self.skip_intro)
+        self.intro_btn.hide()
         self.next_card = NextCard(self.video)
         self.next_card.play_now.connect(self.next_episode_now)
         self.next_card.cancel.connect(self._cancel_next)
 
     def _place_next_card(self):
-        c = self.next_card
-        c.adjustSize()
         bottom = 24
         if self.fullscreen and self.bottom_ov.shown():
             bottom += self.bottom_ov.height()
-        c.move(self.video.width() - c.width() - 24, self.video.height() - c.height() - bottom)
+        for c in (self.next_card, self.intro_btn):
+            c.adjustSize()
+            c.move(self.video.width() - c.width() - 24, self.video.height() - c.height() - bottom)
+
+    # ========================================================= Alkutunnari
+    def _detect_intro(self):
+        """Etsii nykyisen jakson alkutunnarin: luvut -> välimuisti -> äänen vertailu taustalla."""
+        path = self.state.get("path") or ""
+        mode = self.cfg.get("intro_mode")
+        if (mode == "off" or not path or "://" in path or not self.is_real_video()
+                or (self.state.get("duration") or 0) < 300 or path == self._intro_path):
+            return
+        self._intro_path = path
+        self._intro = None
+        self._intro_skipped = False
+        found = intro.from_chapters(self.state.get("chapter-list"), self.state.get("duration"))
+        if found:
+            self._intro = found
+            return
+        c = intro.cached(path)
+        if c != "?":
+            self._intro = tuple(c) if c else None
+            return
+        if intro.np is None or (self._intro_scanner and self._intro_scanner.isRunning()):
+            return
+        other = self._neighbour_episode(path)
+        if other:
+            self._intro_scanner = intro.IntroScanner(path, other, self)
+            self._intro_scanner.found.connect(self._intro_found)
+            self._intro_scanner.start()
+
+    def _neighbour_episode(self, path):
+        folder = str(Path(path).parent)
+        files = [e.get("filename", "") for e in self.playlist]
+        same = [f for f in files if "://" not in f and str(Path(f).parent) == folder]
+        if len(same) < 2:
+            same = [str(p) for p in media_in_folder(folder)
+                    if p.suffix.lower().lstrip(".") not in library.LIB_AUDIO]
+        if path not in same or len(same) < 2:
+            return None
+        i = same.index(path)
+        return same[i + 1] if i + 1 < len(same) else same[i - 1]
+
+    def _intro_found(self, path, result):
+        if path == (self.state.get("path") or "") and result:
+            self._intro = tuple(result)
+
+    def _check_intro(self, t):
+        if not self._intro or t is None or self.cfg.get("intro_mode") == "off":
+            if self.intro_btn.isVisible():
+                self.intro_btn.hide()
+            return
+        start, end = self._intro
+        inside = start - 0.5 <= t < end - 1.5
+        if inside and self.cfg.get("intro_mode") == "auto" and not self._intro_skipped:
+            self.skip_intro()
+            return
+        if inside and not self.intro_btn.isVisible():
+            self._place_next_card()
+            self.intro_btn.show()
+            self.intro_btn.raise_()
+        elif not inside and self.intro_btn.isVisible():
+            self.intro_btn.hide()
+
+    def intro_active(self):
+        t = self.state.get("time-pos")
+        return bool(self._intro and t is not None and self._intro[0] - 0.5 <= t < self._intro[1] - 1.5)
+
+    def skip_intro(self):
+        if not self._intro:
+            return
+        self._intro_skipped = True
+        self.intro_btn.hide()
+        self.video.cmd("seek", self._intro[1], "absolute+exact")
+        self.video.toast("Alkutunnari ohitettu")
 
     def _next_entry(self):
         pos = self.state.get("playlist-pos")
@@ -1278,7 +1368,9 @@ class MainWindow(QMainWindow):
             "current": self.state.get("playlist-pos") if self.state.get("playlist-pos") is not None else -1,
             "cover_id": cover_id, "video": self.is_real_video(), "accent": self.accent,
             "radio": [f["name"] for f in self.radio.favorites()],
+            "radio_favs": [{"name": f["name"], "url": f["url"]} for f in self.radio.favorites()],
             "has_next_episode": self.is_real_video() and self._next_entry() is not None,
+            "intro_active": self.intro_active(),
         }
 
     def on_remote_command(self, cmd, value):
@@ -1317,6 +1409,31 @@ class MainWindow(QMainWindow):
                 self.play_radio(fav["url"], fav["name"])
             elif cmd == "next_episode":
                 self.next_episode_now()
+            elif cmd == "skip_intro":
+                self.skip_intro()
+            elif cmd == "play_path":
+                path = str(value.get("path", ""))
+                drive = next((d for d in list_drives() if d.root == path and d.disc), None)
+                if drive:
+                    self.play_disc(drive)
+                elif Path(path).is_dir():
+                    self.play_folder(path, True)
+                elif Path(path).is_file():
+                    self.play_file_in_context(path)
+            elif cmd == "queue_path":
+                self.add_paths([str(value.get("path", ""))])
+                self.video.toast("Lisätty soittolistaan")
+            elif cmd == "play_paths":
+                paths = [str(x) for x in value.get("paths", [])][:2000]
+                if paths:
+                    self.add_paths(paths, replace=True)
+                    v.cmd("playlist-play-index", int(value.get("index", 0)))
+            elif cmd == "radio_play":
+                self.play_radio(str(value.get("url", "")), str(value.get("name", "Netradio")))
+            elif cmd == "radio_fav":
+                self.radio.toggle_favorite({"name": str(value.get("name", "")), "url": str(value.get("url", "")),
+                                            "favicon": str(value.get("favicon", "")),
+                                            "info": str(value.get("info", ""))})
             elif cmd == "mouse_move":
                 inputsim.move(int(value[0]), int(value[1]))
                 return
@@ -1332,6 +1449,48 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError, IndexError, KeyError):
             pass
         QTimer.singleShot(100, self.update_remote_state)
+
+    # ---- kaukosäätimen selaus (ajetaan palvelinsäikeessä: ei käyttöliittymäkutsuja)
+    def _api_browse(self, path):
+        if not path:
+            return {"path": "", "title": "Tietokone", "parent": None, "items": list(self._root_items)}
+        p = Path(path)
+        if not p.is_dir():
+            return {"error": "Kansiota ei löytynyt."}
+        dirs, files = [], []
+        try:
+            for e in os.scandir(p):
+                if e.name.startswith((".", "$")) or e.name.lower() in ("system volume information",):
+                    continue
+                try:
+                    if e.is_dir():
+                        dirs.append({"name": e.name, "path": e.path, "type": "dir"})
+                    elif is_media(e.name) and not e.name.lower().endswith(".cda"):
+                        ext = e.name.rsplit(".", 1)[-1].lower()
+                        kind = "audio" if ext in AUDIO_EXT else "list" if ext in PLAYLIST_EXT else "video"
+                        files.append({"name": e.name, "path": e.path, "type": kind})
+                except OSError:
+                    continue
+        except OSError as e:
+            return {"error": f"Kansiota ei voitu lukea: {e.strerror or e}"}
+        dirs.sort(key=lambda d: natural_key(d["name"]))
+        files.sort(key=lambda d: natural_key(d["name"]))
+        parent = str(p.parent) if p.parent != p else ""
+        return {"path": str(p), "title": p.name or str(p), "parent": parent, "items": (dirs + files)[:3000]}
+
+    def _api_library(self):
+        tree = library.group_library(dict(self.library_tracks or {}))
+        return {"artists": [
+            {"name": a, "albums": [
+                {"name": al, "year": lst[0].get("year") or "", "count": len(lst)}
+                for al, lst in sorted(tree[a].items(), key=lambda kv: (kv[1][0].get("year") or "", kv[0].lower()))]}
+            for a in sorted(tree, key=str.lower)]}
+
+    def _api_album(self, artist, album):
+        lst = library.group_library(dict(self.library_tracks or {})).get(artist, {}).get(album, [])
+        return {"artist": artist, "album": album, "tracks": [
+            {"title": t.get("title") or Path(t["path"]).stem, "track": t.get("track") or "",
+             "dur": fmt_time(t.get("duration")) if t.get("duration") else "", "path": t["path"]} for t in lst]}
 
     def _show_pair_code(self, code, device):
         if self.pair_dialog:
@@ -1481,6 +1640,10 @@ class MainWindow(QMainWindow):
         if sig == self._drive_sig:
             return
         self._drive_sig = sig
+        self._root_items = (
+            [{"name": d.title, "path": d.root, "type": "disc" if d.disc else "drive", "disc": d.disc}
+             for d in drives if d.ready or d.disc]
+            + [{"name": n, "path": p, "type": "dir"} for n, p in quick_locations()])
         self.drive_tree.clear()
         st = self.style()
         for d in drives:
@@ -1845,6 +2008,7 @@ class MainWindow(QMainWindow):
                 self.seek_slider.blockSignals(False)
                 self.pos_label.setText(fmt_time(value) if value is not None else "0:00")
             self._check_next_card(value)
+            self._check_intro(value)
         elif name == "duration":
             self.seek_slider.setRange(0, int((value or 0) * 1000))
             self.dur_label.setText(fmt_time(value) if value else "0:00")
@@ -1913,6 +2077,10 @@ class MainWindow(QMainWindow):
 
     def on_file_loaded(self):
         self._auto_fs_done = False
+        self._intro = None
+        self._intro_path = ""
+        self.intro_btn.hide()
+        QTimer.singleShot(1500, self._detect_intro)
         self._hide_next_card("idle")
         self.video.set("keep-open", "no")
         if self.pending_chapter is not None:

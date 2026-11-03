@@ -2,3 +2,4 @@ PySide6>=6.6
 mpv>=1.0.6
 mutagen>=1.47
 qrcode>=7.4
+numpy>=1.26

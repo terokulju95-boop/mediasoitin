@@ -100,6 +100,7 @@ class RemoteServer(QObject):
         self.port = None
         self.error = ""
         self._pair = None      # {"code", "device", "expires", "tries"}
+        self.providers = {}    # sovellus asettaa: browse, library, album, radio_search
         self._lock = threading.Lock()
 
     # ---------------------------------------------------------- Laitteet
@@ -203,6 +204,25 @@ class RemoteServer(QObject):
                     self._send(200, PAGE, "text/html; charset=utf-8")
                 elif u.path == "/api/state":
                     self._send(200, owner.state)
+                elif u.path in ("/api/browse", "/api/library", "/api/album", "/api/radio"):
+                    name = u.path.rsplit("/", 1)[-1]
+                    fn = owner.providers.get("radio_search" if name == "radio" else name)
+                    if fn is None:
+                        self._send(404, {})
+                        return
+                    arg = lambda k: q.get(k, [""])[0]  # noqa: E731
+                    try:
+                        if name == "browse":
+                            res = fn(arg("path"))
+                        elif name == "album":
+                            res = fn(arg("artist"), arg("album"))
+                        elif name == "radio":
+                            res = fn(arg("q"))
+                        else:
+                            res = fn()
+                        self._send(200, res)
+                    except Exception as e:
+                        self._send(500, {"error": str(e)})
                 elif u.path == "/api/cover":
                     if owner.cover:
                         self._send(200, owner.cover[1], owner.cover[0])
