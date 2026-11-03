@@ -1,20 +1,30 @@
 """Kaukosäädin puhelimesta.
 
-Soitin käynnistää pienen www-palvelimen kotiverkkoon. Puhelimen selaimella
-avataan QR-koodin osoite, ja toistoa ohjataan sohvalta. Osoitteessa on
-satunnainen avain, joten muut samassa verkossa eivät pääse ohjaamaan soitinta.
+Soitin käynnistää pienen www-palvelimen kotiverkkoon.
+- Selaimella: QR-koodin osoite (sisältää satunnaisen avaimen).
+- Android-sovelluksella: sovellus löytää soittimen itse (UDP-haku) ja muodostaa
+  laiteparin kerran 4-numeroisella koodilla. Sen jälkeen yhteys toimii aina.
 """
 import json
+import platform
 import secrets
 import socket
 import threading
+import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from PySide6.QtCore import QObject, QRectF, QSettings, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton,
-                               QVBoxLayout)
+from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QPushButton, QVBoxLayout)
+
+from . import __version__
+from .remote_page import PAGE
+
+DISCOVERY_PORT = 41234
+DISCOVERY_MAGIC = b"MEDIASOITIN_DISCOVER"
 
 
 def local_ip():
@@ -29,28 +39,93 @@ def local_ip():
         s.close()
 
 
+def computer_name():
+    return platform.node() or socket.gethostname() or "Tietokone"
+
+
 class RemoteServer(QObject):
-    command = Signal(str, object)     # komento, arvo (käsitellään käyttöliittymäsäikeessä)
+    command = Signal(str, object)          # komento, arvo (käsitellään käyttöliittymäsäikeessä)
+    pair_requested = Signal(str, str)      # koodi, laitteen nimi
+    pair_finished = Signal(bool, str)      # onnistui, laitteen nimi
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        qs = QSettings("Mediasoitin", "Mediasoitin")
-        self.token = qs.value("remote/token", "", type=str)
+        self.qs = QSettings("Mediasoitin", "Mediasoitin")
+        self.token = self.qs.value("remote/token", "", type=str)
         if not self.token:
             self.token = secrets.token_urlsafe(8)
-            qs.setValue("remote/token", self.token)
+            self.qs.setValue("remote/token", self.token)
+        self.server_id = self.qs.value("remote/id", "", type=str)
+        if not self.server_id:
+            self.server_id = uuid.uuid4().hex[:12]
+            self.qs.setValue("remote/id", self.server_id)
         self.state = {}        # käyttöliittymä päivittää tätä
-        self.cover = None      # (mime, tavut)
+        self.cover = None      # (mime, tavut, avain)
         self.httpd = None
+        self.udp = None
         self.port = None
         self.error = ""
+        self._pair = None      # {"code", "device", "expires", "tries"}
+        self._lock = threading.Lock()
 
+    # ---------------------------------------------------------- Laitteet
+    def devices(self):
+        try:
+            return json.loads(self.qs.value("remote/devices", "[]", type=str))
+        except Exception:
+            return []
+
+    def _save_devices(self, devs):
+        self.qs.setValue("remote/devices", json.dumps(devs, ensure_ascii=False))
+
+    def remove_device(self, token):
+        self._save_devices([d for d in self.devices() if d.get("token") != token])
+
+    def valid_token(self, tok):
+        if not tok:
+            return False
+        if secrets.compare_digest(tok, self.token):
+            return True
+        return any(secrets.compare_digest(tok, d.get("token", "")) for d in self.devices())
+
+    # ---------------------------------------------------------- Pariutus
+    def start_pairing(self, device):
+        with self._lock:
+            code = f"{secrets.randbelow(10000):04d}"
+            self._pair = {"code": code, "device": device[:40] or "Puhelin",
+                          "expires": time.time() + 180, "tries": 0}
+        self.pair_requested.emit(code, self._pair["device"])
+
+    def confirm_pairing(self, code, device):
+        with self._lock:
+            p = self._pair
+            if not p or time.time() > p["expires"]:
+                return None, "Pariutus on vanhentunut. Aloita uudelleen."
+            p["tries"] += 1
+            if p["tries"] > 5:
+                self._pair = None
+                return None, "Liian monta yritystä. Aloita uudelleen."
+            if not secrets.compare_digest(str(code).strip(), p["code"]):
+                return None, "Väärä koodi."
+            self._pair = None
+        tok = secrets.token_urlsafe(24)
+        devs = self.devices()
+        devs.append({"token": tok, "name": device[:40] or "Puhelin", "added": time.strftime("%d.%m.%Y")})
+        self._save_devices(devs)
+        self.pair_finished.emit(True, device)
+        return tok, ""
+
+    # ---------------------------------------------------------- Palvelin
     @property
     def running(self):
         return self.httpd is not None
 
     def url(self):
         return f"http://{local_ip()}:{self.port}/?k={self.token}"
+
+    def info(self):
+        return {"app": "mediasoitin", "name": computer_name(), "id": self.server_id,
+                "port": self.port, "version": __version__}
 
     def start(self, port):
         if self.httpd:
@@ -61,10 +136,12 @@ class RemoteServer(QObject):
             def log_message(self, *a):
                 pass
 
-            def _ok_token(self, q):
-                return q.get("k", [""])[0] == owner.token
+            def _token(self, q):
+                return q.get("k", [""])[0] or self.headers.get("X-Token", "")
 
             def _send(self, code, body, ctype="application/json; charset=utf-8"):
+                if isinstance(body, (dict, list)):
+                    body = json.dumps(body, ensure_ascii=False)
                 if isinstance(body, str):
                     body = body.encode("utf-8")
                 self.send_response(code)
@@ -74,38 +151,56 @@ class RemoteServer(QObject):
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _json(self):
+                n = min(int(self.headers.get("Content-Length", 0) or 0), 10000)
+                return json.loads(self.rfile.read(n) or b"{}")
+
             def do_GET(self):
                 u = urlparse(self.path)
                 q = parse_qs(u.query)
-                if not self._ok_token(q):
-                    self._send(403, "<h1>Väärä tai puuttuva avain</h1><p>Skannaa QR-koodi soittimesta uudelleen.</p>",
-                               "text/html; charset=utf-8")
+                if u.path == "/api/info":
+                    self._send(200, owner.info())
+                    return
+                if not owner.valid_token(self._token(q)):
+                    self._send(403, "<h1>Väärä tai puuttuva avain</h1><p>Skannaa QR-koodi soittimesta uudelleen "
+                               "tai muodosta laitepari sovelluksessa.</p>", "text/html; charset=utf-8")
                     return
                 if u.path == "/":
                     self._send(200, PAGE, "text/html; charset=utf-8")
                 elif u.path == "/api/state":
-                    self._send(200, json.dumps(owner.state, ensure_ascii=False))
+                    self._send(200, owner.state)
                 elif u.path == "/api/cover":
                     if owner.cover:
                         self._send(200, owner.cover[1], owner.cover[0])
                     else:
-                        self._send(404, "{}")
+                        self._send(404, {})
                 else:
-                    self._send(404, "{}")
+                    self._send(404, {})
 
             def do_POST(self):
                 u = urlparse(self.path)
                 q = parse_qs(u.query)
-                if not self._ok_token(q) or u.path != "/api/cmd":
-                    self._send(403, "{}")
-                    return
                 try:
-                    n = min(int(self.headers.get("Content-Length", 0)), 10000)
-                    data = json.loads(self.rfile.read(n) or b"{}")
-                    owner.command.emit(str(data.get("cmd", "")), data.get("value"))
-                    self._send(200, '{"ok":true}')
+                    data = self._json()
                 except Exception:
-                    self._send(400, "{}")
+                    self._send(400, {})
+                    return
+                if u.path == "/api/pair/request":
+                    owner.start_pairing(str(data.get("device", "")))
+                    self._send(200, {"ok": True})
+                    return
+                if u.path == "/api/pair/confirm":
+                    tok, err = owner.confirm_pairing(data.get("code", ""), str(data.get("device", "")))
+                    if tok:
+                        self._send(200, dict(owner.info(), token=tok))
+                    else:
+                        self._send(403, {"error": err})
+                    return
+                if u.path != "/api/cmd" or not owner.valid_token(self._token(q)):
+                    self._send(403, {})
+                    return
+                owner.command.emit(str(data.get("cmd", "")), data.get("value"))
+                self._send(200, {"ok": True})
 
         try:
             self.httpd = ThreadingHTTPServer(("0.0.0.0", int(port)), Handler)
@@ -117,16 +212,49 @@ class RemoteServer(QObject):
         self.port = int(port)
         self.error = ""
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self._start_discovery()
         return True
 
+    def _start_discovery(self):
+        """Vastaa Android-sovelluksen hakuun (UDP-yleislähetys)."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", DISCOVERY_PORT))
+            sock.settimeout(1.0)
+        except OSError:
+            self.udp = None
+            return
+        self.udp = sock
+
+        def loop():
+            while self.udp is sock:
+                try:
+                    data, addr = sock.recvfrom(256)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if data.strip() == DISCOVERY_MAGIC and self.port:
+                    try:
+                        sock.sendto(json.dumps(self.info()).encode("utf-8"), addr)
+                    except OSError:
+                        pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        threading.Thread(target=loop, daemon=True).start()
+
     def stop(self):
+        self.udp = None
         if self.httpd:
             h = self.httpd
             self.httpd = None
             threading.Thread(target=lambda: (h.shutdown(), h.server_close()), daemon=True).start()
 
 
-def qr_pixmap(text, size=280):
+def qr_pixmap(text, size=260):
     try:
         import qrcode
     except ImportError:
@@ -150,16 +278,43 @@ def qr_pixmap(text, size=280):
     return pm
 
 
+class PairCodeDialog(QDialog):
+    """Näytetään, kun puhelin pyytää laiteparia."""
+
+    def __init__(self, code, device, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Laitepari")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        lay = QVBoxLayout(self)
+        t = QLabel(f"<b>{device}</b> haluaa ohjata soitinta.<br>Syötä puhelimeen tämä koodi:")
+        t.setAlignment(Qt.AlignCenter)
+        c = QLabel(" ".join(code))
+        c.setAlignment(Qt.AlignCenter)
+        c.setStyleSheet("font-size: 44pt; font-weight: bold; letter-spacing: 6px; padding: 10px 24px;")
+        n = QLabel("Koodi on voimassa 3 minuuttia. Jos et tunnista laitetta, sulje tämä ikkuna.")
+        n.setObjectName("pathLabel")
+        n.setWordWrap(True)
+        close = QPushButton("Sulje")
+        close.clicked.connect(self.close)
+        lay.addWidget(t)
+        lay.addWidget(c)
+        lay.addWidget(n)
+        lay.addWidget(close, 0, Qt.AlignRight)
+        self.setMinimumWidth(380)
+
+
 class RemoteDialog(QDialog):
     def __init__(self, server: RemoteServer, cfg, parent=None):
         super().__init__(parent)
         self.server = server
         self.cfg = cfg
         self.setWindowTitle("Kaukosäädin puhelimesta")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(460)
         self.enable = QCheckBox("Kaukosäädin käytössä")
         self.enable.setChecked(server.running)
         self.enable.toggled.connect(self._toggle)
+        self.app_info = QLabel()
+        self.app_info.setWordWrap(True)
         self.qr = QLabel()
         self.qr.setAlignment(Qt.AlignCenter)
         self.url = QLabel()
@@ -168,22 +323,27 @@ class RemoteDialog(QDialog):
         self.help = QLabel()
         self.help.setWordWrap(True)
         self.help.setObjectName("pathLabel")
-        new_key = QPushButton("Vaihda avain")
-        new_key.setToolTip("Luo uusi QR-koodi. Vanhalla koodilla avatut puhelimet eivät enää pääse ohjaamaan.")
+        self.dev_title = QLabel("<b>Laiteparit</b> (Android-sovellus)")
+        self.dev_list = QListWidget()
+        self.dev_list.setMaximumHeight(110)
+        rm = QPushButton("Poista valittu laite")
+        rm.clicked.connect(self._remove_device)
+        new_key = QPushButton("Vaihda QR-avain")
+        new_key.setToolTip("Luo uuden QR-koodin. Vanhalla koodilla avatut selaimet eivät enää pääse ohjaamaan.")
         new_key.clicked.connect(self._new_key)
         close = QPushButton("Sulje")
         close.setDefault(True)
         close.clicked.connect(self.close)
         btns = QHBoxLayout()
+        btns.addWidget(rm)
         btns.addWidget(new_key)
         btns.addStretch()
         btns.addWidget(close)
         lay = QVBoxLayout(self)
-        lay.addWidget(self.enable)
-        lay.addWidget(self.qr)
-        lay.addWidget(self.url)
-        lay.addWidget(self.help)
+        for w in (self.enable, self.app_info, self.qr, self.url, self.help, self.dev_title, self.dev_list):
+            lay.addWidget(w)
         lay.addLayout(btns)
+        server.pair_finished.connect(lambda *_: self._refresh())
         self._refresh()
 
     def _toggle(self, on):
@@ -200,11 +360,29 @@ class RemoteDialog(QDialog):
 
     def _new_key(self):
         self.server.token = secrets.token_urlsafe(8)
-        QSettings("Mediasoitin", "Mediasoitin").setValue("remote/token", self.server.token)
+        self.server.qs.setValue("remote/token", self.server.token)
         self._refresh()
 
+    def _remove_device(self):
+        it = self.dev_list.currentItem()
+        if it and it.data(Qt.UserRole):
+            self.server.remove_device(it.data(Qt.UserRole))
+            self._refresh()
+
     def _refresh(self):
+        self.dev_list.clear()
+        for d in self.server.devices():
+            it = QListWidgetItem(f"{d.get('name')}   (lisätty {d.get('added', '')})")
+            it.setData(Qt.UserRole, d.get("token"))
+            self.dev_list.addItem(it)
+        if not self.server.devices():
+            it = QListWidgetItem("Ei laitepareja")
+            it.setFlags(Qt.NoItemFlags)
+            self.dev_list.addItem(it)
         if self.server.running:
+            self.app_info.setText(
+                "<b>Android-sovellus:</b> avaa Mediasoitin-kaukosäädin puhelimessa, niin se löytää tämän "
+                "koneen itse. Ensimmäisellä kerralla tähän ruutuun tulee koodi, jonka syötät puhelimeen.")
             url = self.server.url()
             pm = qr_pixmap(url)
             if pm:
@@ -212,104 +390,12 @@ class RemoteDialog(QDialog):
             self.qr.show()
             self.url.setText(url)
             self.help.setText(
-                "1. Yhdistä puhelin samaan wifiin kuin tämä tietokone.\n"
-                "2. Avaa puhelimen kamera ja osoita QR-koodia, tai kirjoita osoite selaimeen.\n"
-                "3. Vinkki: lisää sivu puhelimen aloitusnäyttöön, niin kaukosäädin on aina käden ulottuvilla.\n\n"
-                "Jos sivu ei aukea, salli Mediasoitin Windowsin palomuurissa "
+                "<b>Selaimella</b> (muut puhelimet): skannaa QR-koodi samasta wifistä.<br><br>"
+                "Jos puhelin ei löydä konetta, salli Mediasoitin Windowsin palomuurissa "
                 "(kysytään ensimmäisellä kerralla – valitse Yksityiset verkot).")
         else:
             self.qr.hide()
+            self.app_info.setText("")
             self.url.setText(self.server.error or "")
-            self.help.setText("Ota kaukosäädin käyttöön, niin tähän tulee QR-koodi puhelimella skannattavaksi.")
+            self.help.setText("Ota kaukosäädin käyttöön, niin puhelin voi ohjata soitinta.")
         self.adjustSize()
-
-
-# ------------------------------------------------------------------ Mobiilisivu
-PAGE = r"""<!DOCTYPE html>
-<html lang="fi"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<meta name="theme-color" content="#000000">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<title>Mediasoitin</title>
-<style>
-:root{--a:#D35400;--t:#E6E6E6;--m:#8C8C8C;--s:#121212}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-body{margin:0;background:#000;color:var(--t);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
- display:flex;flex-direction:column;min-height:100vh;user-select:none}
-header{padding:14px 16px 4px;color:var(--m);font-size:13px;letter-spacing:1px;text-transform:uppercase}
-#cover{width:min(62vw,280px);aspect-ratio:1;margin:12px auto 0;border-radius:14px;background:#141414 center/cover no-repeat;
- display:flex;align-items:center;justify-content:center;font-size:64px;color:var(--a)}
-#title{font-size:21px;font-weight:700;text-align:center;margin:18px 16px 4px;line-height:1.25}
-#artist{color:var(--a);text-align:center;font-size:16px;min-height:20px;margin:0 16px}
-.time{display:flex;justify-content:space-between;color:var(--m);font-size:13px;margin:18px 22px 4px;font-variant-numeric:tabular-nums}
-input[type=range]{-webkit-appearance:none;appearance:none;width:calc(100% - 44px);margin:0 22px;height:6px;border-radius:3px;
- background:#2a2a2a;outline:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:var(--a)}
-input[type=range]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:var(--a);border:0}
-.row{display:flex;justify-content:center;align-items:center;gap:14px;margin:18px 0}
-button{background:var(--s);color:var(--t);border:0;border-radius:50%;width:62px;height:62px;font-size:22px;display:flex;
- align-items:center;justify-content:center;touch-action:manipulation}
-button:active{background:#2a2a2a}
-#play{width:84px;height:84px;background:var(--a);color:#fff;font-size:32px}
-.small{width:auto;height:44px;border-radius:22px;padding:0 16px;font-size:15px}
-.vol{display:flex;align-items:center;gap:10px;margin:8px 22px}
-.vol input{margin:0;width:100%}
-#list{margin:10px 0 20px;border-top:1px solid #222}
-.item{padding:13px 18px;border-bottom:1px solid #161616;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.item.cur{color:var(--a);font-weight:700}
-#off{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);align-items:center;justify-content:center;
- text-align:center;padding:30px;color:var(--m)}
-svg{width:26px;height:26px;fill:currentColor}
-</style></head><body>
-<header>Mediasoitin · kaukosäädin</header>
-<div id="cover">♪</div>
-<div id="title">–</div>
-<div id="artist"></div>
-<div class="time"><span id="pos">0:00</span><span id="dur">0:00</span></div>
-<input type="range" id="seek" min="0" max="1000" value="0">
-<div class="row">
- <button onclick="cmd('seek',-10)" title="-10 s"><svg viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6 8.5 6V6l-8.5 6z"/></svg></button>
- <button onclick="cmd('prev')"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg></button>
- <button id="play" onclick="cmd('toggle')"><svg id="pi" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
- <button onclick="cmd('next')"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
- <button onclick="cmd('seek',10)" title="+10 s"><svg viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg></button>
-</div>
-<div class="vol"><button class="small" onclick="cmd('mute')" id="mute">🔊</button>
- <input type="range" id="vol" min="0" max="100" value="100"></div>
-<div class="row">
- <button class="small" onclick="cmd('fullscreen')">⛶ Koko näyttö</button>
- <button class="small" onclick="cmd('stop')">■ Pysäytä</button>
-</div>
-<div id="list"></div>
-<div id="off">Yhteys soittimeen katkesi.<br><br>Onko soitin auki ja puhelin samassa wifissä?</div>
-<script>
-const K=new URLSearchParams(location.search).get('k');
-const $=id=>document.getElementById(id);
-let st={},dragging=false,volDrag=false,lastCover='';
-function fmt(s){if(s==null||s<0)return'0:00';s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
- return h?`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${m}:${String(x).padStart(2,'0')}`}
-async function cmd(c,v){try{await fetch('/api/cmd?k='+K,{method:'POST',body:JSON.stringify({cmd:c,value:v})});setTimeout(poll,150)}catch(e){}}
-async function poll(){
- try{const r=await fetch('/api/state?k='+K,{cache:'no-store'});st=await r.json();$('off').style.display='none'}
- catch(e){$('off').style.display='flex';return}
- document.documentElement.style.setProperty('--a',st.accent||'#D35400');
- $('title').textContent=st.title||'Ei toistoa';$('artist').textContent=st.artist||'';
- $('pos').textContent=fmt(st.pos);$('dur').textContent=fmt(st.dur);
- if(!dragging)$('seek').value=st.dur?Math.round(1000*st.pos/st.dur):0;
- if(!volDrag)$('vol').value=st.volume??100;
- $('mute').textContent=st.mute?'🔇':'🔊';
- $('pi').innerHTML=st.paused?'<path d="M8 5v14l11-7z"/>':'<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>';
- if(st.cover_id!==lastCover){lastCover=st.cover_id;
-  if(st.cover_id){$('cover').style.backgroundImage=`url(/api/cover?k=${K}&v=${st.cover_id})`;$('cover').textContent=''}
-  else{$('cover').style.backgroundImage='';$('cover').textContent=st.video?'▶':'♪'}}
- const L=$('list');const items=st.playlist||[];
- if(L.dataset.sig!==JSON.stringify([items,st.current])){L.dataset.sig=JSON.stringify([items,st.current]);
-  L.innerHTML='';items.forEach((n,i)=>{const d=document.createElement('div');d.className='item'+(i===st.current?' cur':'');
-   d.textContent=(i+1)+'. '+n;d.onclick=()=>cmd('play_index',i);L.appendChild(d)})}
-}
-$('seek').addEventListener('input',()=>{dragging=true;$('pos').textContent=fmt(st.dur*$('seek').value/1000)});
-$('seek').addEventListener('change',()=>{cmd('seek_abs',st.dur*$('seek').value/1000);dragging=false});
-$('vol').addEventListener('input',()=>{volDrag=true;cmd('volume',+$('vol').value)});
-$('vol').addEventListener('change',()=>{volDrag=false});
-setInterval(poll,1000);poll();
-</script></body></html>"""

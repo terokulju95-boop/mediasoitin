@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
 
 from . import __version__, cdaudio, library, subtitles, theme, updater, videoadjust
 from .radio import RadioPanel
-from .remote import RemoteDialog, RemoteServer
+from . import inputsim
+from .remote import PairCodeDialog, RemoteDialog, RemoteServer
 from .dvdcopy import DvdCopyWorker, disc_size, safe_name, unique_folder
 from .preview import ThumbnailWorker
 from .drives import NETWORK, OPTICAL, REMOVABLE, list_drives, quick_locations
@@ -292,6 +293,9 @@ class MainWindow(QMainWindow):
         self.next_timer = QTimer(self, interval=1000, timeout=self._next_tick)
         self.remote = RemoteServer(self)
         self.remote.command.connect(self.on_remote_command)
+        self.remote.pair_requested.connect(self._show_pair_code)
+        self.remote.pair_finished.connect(self._pair_done)
+        self.pair_dialog = None
         self.remote_dialog = None
         self._cover_bytes = None
         self.remote_timer = QTimer(self, interval=700, timeout=self.update_remote_state)
@@ -1266,6 +1270,8 @@ class MainWindow(QMainWindow):
             "mute": bool(self.state.get("mute")), "playlist": names,
             "current": self.state.get("playlist-pos") if self.state.get("playlist-pos") is not None else -1,
             "cover_id": cover_id, "video": self.is_real_video(), "accent": self.accent,
+            "radio": [f["name"] for f in self.radio.favorites()],
+            "has_next_episode": self.is_real_video() and self._next_entry() is not None,
         }
 
     def on_remote_command(self, cmd, value):
@@ -1273,6 +1279,13 @@ class MainWindow(QMainWindow):
         try:
             if cmd == "toggle":
                 self.toggle_pause()
+            elif cmd == "play":
+                if self.state.get("pause") or self.state.get("idle-active", True):
+                    self.toggle_pause()
+            elif cmd == "pause":
+                v.set("pause", True)
+            elif cmd == "volume_rel":
+                v.cmd("add", "volume", float(value or 0))
             elif cmd == "next":
                 self.next()
             elif cmd == "prev":
@@ -1292,9 +1305,41 @@ class MainWindow(QMainWindow):
             elif cmd == "play_index":
                 v.cmd("playlist-play-index", int(value))
                 v.set("pause", False)
-        except (TypeError, ValueError):
+            elif cmd == "play_radio":
+                fav = self.radio.favorites()[int(value)]
+                self.play_radio(fav["url"], fav["name"])
+            elif cmd == "next_episode":
+                self.next_episode_now()
+            elif cmd == "mouse_move":
+                inputsim.move(int(value[0]), int(value[1]))
+                return
+            elif cmd == "mouse_click":
+                inputsim.click("right" if value == "right" else "left")
+            elif cmd == "mouse_scroll":
+                inputsim.scroll(int(value))
+                return
+            elif cmd == "key":
+                inputsim.key(str(value))
+            elif cmd == "type":
+                inputsim.type_text(str(value))
+        except (TypeError, ValueError, IndexError, KeyError):
             pass
         QTimer.singleShot(100, self.update_remote_state)
+
+    def _show_pair_code(self, code, device):
+        if self.pair_dialog:
+            self.pair_dialog.close()
+        self.pair_dialog = PairCodeDialog(code, device, self)
+        self.pair_dialog.show()
+        self.pair_dialog.raise_()
+        self.pair_dialog.activateWindow()
+
+    def _pair_done(self, ok, device):
+        if self.pair_dialog:
+            self.pair_dialog.close()
+            self.pair_dialog = None
+        if ok:
+            self.video.toast(f"Laitepari muodostettu: {device}", 3000)
 
     # ========================================================= Päivitykset
     def check_updates(self, silent=True):

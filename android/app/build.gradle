@@ -1,0 +1,56 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// Versionumero luetaan soittimen tiedostosta, jotta soitin ja sovellus pysyvät samassa versiossa.
+def soitinVersion = {
+    def f = rootProject.file('../soitin/__init__.py')
+    def m = (f.text =~ /__version__ = "([0-9.]+)"/)
+    return m.find() ? m.group(1) : "1.0.0"
+}()
+def vparts = soitinVersion.tokenize('.').collect { it as int }
+while (vparts.size() < 3) { vparts << 0 }
+
+android {
+    namespace 'fi.mediasoitin.kaukosaadin'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'fi.mediasoitin.kaukosaadin'
+        minSdk 24
+        targetSdk 34
+        versionCode vparts[0] * 10000 + vparts[1] * 100 + vparts[2]
+        versionName soitinVersion
+    }
+
+    signingConfigs {
+        release {
+            // Kiinteä allekirjoitus: päivitykset asentuvat vanhan version päälle.
+            storeFile rootProject.file('release.keystore')
+            storePassword 'mediasoitin'
+            keyAlias 'kaukosaadin'
+            keyPassword 'mediasoitin'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.media:media:1.7.0'
+}
