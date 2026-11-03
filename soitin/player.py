@@ -263,10 +263,11 @@ class MpvWidget(QOpenGLWidget):
                     p.fillRect(QRectF(tx - 8, ty, tw + 8, rowh), hl)
                 p.setFont(self._font(10, is_cur))
                 p.setPen(self.accent if is_cur else QColor("#8C8C8C"))
-                p.drawText(QRectF(tx, ty, 34, rowh), Qt.AlignVCenter | Qt.AlignRight, str(num or i + 1))
+                numw = max(34, p.fontMetrics().horizontalAdvance(str(num)) + 4)
+                p.drawText(QRectF(tx, ty, numw, rowh), Qt.AlignVCenter | Qt.AlignRight, str(num or i + 1))
                 p.setPen(QColor("#FFFFFF") if is_cur else QColor("#CFCFCF"))
-                p.drawText(QRectF(tx + 46, ty, tw - 110, rowh), Qt.AlignVCenter | Qt.AlignLeft,
-                           p.fontMetrics().elidedText(title, Qt.ElideRight, int(tw - 110)))
+                p.drawText(QRectF(tx + numw + 12, ty, tw - numw - 76, rowh), Qt.AlignVCenter | Qt.AlignLeft,
+                           p.fontMetrics().elidedText(title, Qt.ElideRight, int(tw - numw - 76)))
                 p.setPen(QColor("#8C8C8C"))
                 p.drawText(QRectF(tx + tw - 60, ty, 56, rowh), Qt.AlignVCenter | Qt.AlignRight, dur)
                 ty += rowh

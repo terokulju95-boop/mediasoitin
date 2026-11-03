@@ -22,6 +22,7 @@ DEFAULTS = {
     "resume": False,             # jatka siitä mihin jäit
     "auto_fullscreen": False,    # koko näyttö kun video alkaa
     "hide_delay": 2.5,           # s, koko näytön palkit piiloon
+    "hold_speed": 2.0,           # kelausnäppäin pohjassa -> nopeutettu toisto (0 = pois)
     "auto_next": True,           # seuraava jakso automaattisesti
     "next_offer": 20,            # s ennen loppua: "Seuraava jakso" -kortti (lopputekstien ohitus)
     "next_countdown": 10,        # s laskuri kortissa
@@ -40,6 +41,7 @@ DEFAULTS = {
     # Tekstitys
     "slang": "fin,fi,eng,en",
     "sub_auto": True,
+    "sub_smart": True,           # suomi-tekstitys vain, jos puhe ei ole suomea
     "sub_scale": 1.0,
     # Ulkoasu
     "accent": theme.DEFAULT_ACCENT,
@@ -215,6 +217,9 @@ class SettingsDialog(QDialog):
         f.addRow("Tuplaklikkaus videoon:", self._combo(
             "dblclick_action", [("fullscreen", "Koko näyttö"), ("none", "Ei mitään")]))
         f.addRow("Palkit piiloon koko näytöllä:", self._spin("hide_delay", 1, 10, " s", 1, 0.5))
+        f.addRow("Kelausnäppäin pohjassa:", self._combo("hold_speed", [
+            (2.0, "Toista 2× nopeudella niin kauan kuin näppäin on alhaalla"),
+            (1.5, "Toista 1,5× nopeudella"), (3.0, "Toista 3× nopeudella"), (0.0, "Pois (kelaa toistuvasti)")]))
         f.addRow("", self._check("queue_folder", "Tiedoston tuplaklikkaus laittaa saman kansion muut tiedostot jonoon"))
         f.addRow("", self._check("resume", "Jatka siitä mihin jäit (muistaa toistokohdan)"))
         f.addRow("", self._check("auto_fullscreen", "Siirry koko näytölle, kun video alkaa"))
@@ -261,6 +266,9 @@ class SettingsDialog(QDialog):
         f.addRow("Tekstityksen kielet:", self._line("slang", "esim. fin,fi,eng,en"))
         f.addRow("Tekstin koko:", self._spin("sub_scale", 0.5, 3.0, " ×", 2, 0.1))
         f.addRow("", self._check("sub_auto", "Lataa samannimiset tekstitystiedostot automaattisesti (.srt, .ass…)"))
+        f.addRow("", self._check("sub_smart", "Älykäs valinta: tekstitys vain, jos puhe ei ole suomea"))
+        f.addRow("", self._note("Suomenkielisessä ohjelmassa tekstitys jätetään pois, muissa valitaan suomenkielinen "
+                                "tekstitys. Jos ääniraidan kieltä ei ole merkitty, käytetään yllä olevaa kielijärjestystä."))
         f.addRow("", self._note("Fontti, värit, reunus, tausta ja korkeus: Tekstitys → Tekstitysten ulkoasu…"))
         return page
 

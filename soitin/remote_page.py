@@ -99,6 +99,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
   </div>
   <div class="vol"><button class="btn pill" onclick="cmd('mute')" id="mute">🔊</button>
    <input type="range" id="vol" min="0" max="100" value="100"></div>
+  <div id="rhistBox" style="display:none"><div class="subh">Äsken soi</div><div id="rhist"></div></div>
   <div class="row">
    <button class="btn pill" onclick="cmd('fullscreen')">⛶ Koko näyttö</button>
    <button class="btn pill" onclick="cmd('stop')">■ Pysäytä</button>
@@ -240,6 +241,9 @@ async function poll(){
   if(st.cover_id){$('cover').style.backgroundImage=`url(/api/cover?k=${K}&v=${st.cover_id})`;$('cover').textContent=''}
   else{$('cover').style.backgroundImage='';$('cover').textContent=st.video?'▶':'♪'}}
  list($('list'),(st.playlist||[]).map((n,i)=>(i+1)+'. '+n),st.current,i=>cmd('play_index',i),'Soittolista on tyhjä.');
+ const hist=st.radio_history||[];$('rhistBox').style.display=hist.length?'block':'none';
+ const hs=JSON.stringify(hist);if($('rhist').dataset.sig!==hs){$('rhist').dataset.sig=hs;$('rhist').innerHTML=
+  hist.map((h,i)=>`<div class="item${i===0?' cur':''}" style="padding:10px 18px">${esc(h)}</div>`).join('')}
  const favSig=JSON.stringify(st.radio_favs||[]);if(R.favSig!==favSig){R.favSig=favSig;renderRadio()}
 }
 $('seek').addEventListener('input',()=>{dragging=true;$('pos').textContent=fmt(st.dur*$('seek').value/1000)});

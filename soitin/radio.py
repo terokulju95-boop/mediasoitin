@@ -61,6 +61,7 @@ class StationDialog(QDialog):
 
 class RadioPanel(QWidget):
     play = Signal(str, str)      # osoite, aseman nimi
+    history = Signal(str, str)   # osoite, aseman nimi
 
     def __init__(self, accent="#D35400", parent=None):
         super().__init__(parent)
@@ -295,5 +296,6 @@ class RadioPanel(QWidget):
         m.addAction("Kuuntele", lambda: self.play.emit(st["url"], st["name"]))
         m.addAction("Poista suosikeista" if self.is_favorite(st["url"]) else "Lisää suosikiksi ★",
                     lambda: self.toggle_favorite(st))
+        m.addAction("Kappalehistoria…", lambda: self.history.emit(st["url"], st["name"]))
         m.addAction("Kopioi osoite", lambda: QApplication.clipboard().setText(st["url"]))
         m.exec(self.list.viewport().mapToGlobal(pos))

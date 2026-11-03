@@ -1,4 +1,5 @@
 """Mediasoittimen pääikkuna."""
+import json
 import os
 import sys
 import time
@@ -47,6 +48,78 @@ class NavKeyFilter(QObject):
                 e.accept()
                 return True
         return False
+
+
+class HoldKeyFilter(QObject):
+    """Kelausnäppäin (oletus →): lyhyt painallus kelaa, pohjassa pitäminen nopeuttaa toistoa."""
+
+    HOLD_MS = 350
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.pressed = False
+        self.holding = False
+        self.prev_speed = 1.0
+        self.timer = QTimer(self, singleShot=True, interval=self.HOLD_MS, timeout=self._start_hold)
+
+    def _key(self):
+        seq = self.win.act["seek_fwd"].shortcut()
+        if seq.isEmpty():
+            return None
+        kc = seq[0]
+        if kc.keyboardModifiers() != Qt.NoModifier:
+            return None
+        return kc.key()
+
+    def _active(self, obj):
+        if self.win.cfg.get("hold_speed") <= 0 or not self.win.isActiveWindow():
+            return False
+        fw = QApplication.focusWidget()
+        return not isinstance(fw, (QAbstractItemView, QLineEdit)) and not QApplication.activePopupWidget()
+
+    def eventFilter(self, obj, e):
+        t = e.type()
+        if t not in (QEvent.ShortcutOverride, QEvent.KeyPress, QEvent.KeyRelease):
+            return False
+        key = self._key()
+        if key is None or e.key() != key or e.modifiers() != Qt.NoModifier:
+            return False
+        if not self._active(obj) and not self.pressed:
+            return False
+        if t == QEvent.ShortcutOverride:
+            e.accept()            # pikanäppäin ei laukea, käsitellään itse
+            return True
+        if t == QEvent.KeyPress:
+            if not e.isAutoRepeat() and not self.pressed:
+                self.pressed = True
+                self.timer.start()
+            return True
+        if t == QEvent.KeyRelease:
+            if e.isAutoRepeat():
+                return True
+            self.pressed = False
+            if self.timer.isActive():          # lyhyt painallus = tavallinen kelaus
+                self.timer.stop()
+                self.win.seek_by(self.win.cfg.get("seek_short"))
+            elif self.holding:
+                self.holding = False
+                self.win.video.set("speed", self.prev_speed)
+                self.win.video.toast(f"Nopeus {self.prev_speed:g}×")
+            return True
+        return False
+
+    def _start_hold(self):
+        w = self.win
+        if not self.pressed or w.state.get("idle-active", True):
+            return
+        self.holding = True
+        self.prev_speed = w.state.get("speed") or 1.0
+        speed = w.cfg.get("hold_speed")
+        w.video.set("speed", speed)
+        if w.state.get("pause"):
+            w.video.set("pause", False)
+        w.video.toast(f"▶▶ {speed:g}×  (päästä irti palataksesi)", 60000)
 
 
 class SeekSlider(QSlider):
@@ -290,11 +363,13 @@ class MainWindow(QMainWindow):
         self._hover = None
         self.thumb_timer = QTimer(self, singleShot=True, interval=90, timeout=self._request_thumb)
         self.radio_names = {}           # striimin osoite -> aseman nimi
+        self._last_icy = ""
         self._next_state = "idle"       # idle / counting / dismissed
         self._intro = None              # (alku, loppu) nykyiselle jaksolle
         self._intro_path = ""
         self._intro_skipped = False
         self._intro_scanner = None
+        self._subs_decided = ""         # tiedosto, jolle älykäs tekstitysvalinta on tehty
         self._next_left = 0
         self.next_timer = QTimer(self, interval=1000, timeout=self._next_tick)
         self.remote = RemoteServer(self)
@@ -319,6 +394,8 @@ class MainWindow(QMainWindow):
         self._build_fullscreen()
         self.refresh_icons()
         self.nav_filter = NavKeyFilter(self)
+        self.hold_filter = HoldKeyFilter(self)
+        QApplication.instance().installEventFilter(self.hold_filter)
         QApplication.instance().installEventFilter(self.nav_filter)
 
         sig = self.video.signals
@@ -495,6 +572,7 @@ class MainWindow(QMainWindow):
         self.left_tabs.addTab(self._build_library_panel(), "Kirjasto")
         self.radio = RadioPanel(self.accent)
         self.radio.play.connect(self.play_radio)
+        self.radio.history.connect(self.show_radio_history)
         self.left_tabs.addTab(self.radio, "Radio")
         self.left_tabs.currentChanged.connect(lambda i: i == 2 and self.radio.ensure_loaded())
         self.left_tabs.currentChanged.connect(lambda i: self.settings.setValue("left_tab", i))
@@ -777,6 +855,10 @@ class MainWindow(QMainWindow):
         m.addAction(A["sub_cycle"])
         m.addAction("Lataa tekstitystiedosto…", self.load_subtitle)
         m.addAction("Tekstitysten ulkoasu…", self.open_sub_style)
+        self.smart_sub_action = m.addAction("Älykäs valinta (tekstitys vain vieraskieliseen puheeseen)")
+        self.smart_sub_action.setCheckable(True)
+        self.smart_sub_action.setChecked(self.cfg.get("sub_smart"))
+        self.smart_sub_action.toggled.connect(lambda on: self.cfg.set("sub_smart", on))
         m.addSeparator()
         m.addAction("Suurempi teksti", lambda: self.video.cmd("add", "sub-scale", 0.1))
         m.addAction("Pienempi teksti", lambda: self.video.cmd("add", "sub-scale", -0.1))
@@ -1185,8 +1267,9 @@ class MainWindow(QMainWindow):
 
     def _place_next_card(self):
         bottom = 24
-        if self.fullscreen and self.bottom_ov.shown():
-            bottom += self.bottom_ov.height()
+        if self.fullscreen:
+            # koko näytöllä aina ohjainpalkin yläpuolelle, ettei palkki nouse painikkeen päälle
+            bottom += max(self.bottom_ov.height(), self.controls.sizeHint().height(), 52)
         for c in (self.next_card, self.intro_btn):
             c.adjustSize()
             c.move(self.video.width() - c.width() - 24, self.video.height() - c.height() - bottom)
@@ -1217,6 +1300,41 @@ class MainWindow(QMainWindow):
             self._intro_scanner = intro.IntroScanner(path, other, self)
             self._intro_scanner.found.connect(self._intro_found)
             self._intro_scanner.start()
+
+    # ========================================================= Älykäs tekstitys
+    FI_CODES = {"fin", "fi", "suomi", "finnish"}
+
+    def _is_finnish(self, t):
+        lang = str(t.get("lang") or "").lower()
+        title = str(t.get("title") or "").lower()
+        return lang in self.FI_CODES or "suomi" in title or "finnish" in title
+
+    def _smart_subtitles(self, tracks):
+        path = self.state.get("path") or ""
+        if not self.cfg.get("sub_smart") or not path or path == self._subs_decided or not self.is_real_video():
+            return
+        audio = next((t for t in tracks if t.get("type") == "audio" and t.get("selected")), None)
+        subs = [t for t in tracks if t.get("type") == "sub"]
+        if audio is None:
+            return
+        self._subs_decided = path
+        if not subs:
+            return
+        lang = str(audio.get("lang") or "").lower()
+        if self._is_finnish(audio):
+            forced = next((t for t in subs if t.get("forced") and self._is_finnish(t)), None)
+            if forced:
+                self.video.set("sid", forced.get("id"))
+            else:
+                self.video.set("sid", "no")
+            self.video.toast("Puhe on suomea – tekstitys pois")
+        elif lang and lang not in ("und", "unknown"):
+            fi = [t for t in subs if self._is_finnish(t)]
+            if fi:
+                best = next((t for t in fi if not t.get("forced")), fi[0])
+                self.video.set("sid", best.get("id"))
+                self.video.set("sub-visibility", True)
+        # kieli tuntematon: mpv:n oma valinta (Asetukset → Tekstitys → kielet) jää voimaan
 
     def _neighbour_episode(self, path):
         folder = str(Path(path).parent)
@@ -1325,8 +1443,56 @@ class MainWindow(QMainWindow):
         self.next_card.hide()
 
     # ========================================================= Netradio
+    def radio_history(self, url):
+        try:
+            return json.loads(self.settings.value("radio/history", "{}", type=str)).get(url, [])
+        except Exception:
+            return []
+
+    def _record_radio_song(self, md):
+        path = self.state.get("path") or ""
+        if not path.startswith("http") or not md:
+            return
+        low = {str(k).lower(): v for k, v in md.items()}
+        title = str(low.get("icy-title") or "").strip()
+        if not title or title == self._last_icy or len(title) < 3:
+            return
+        self._last_icy = title
+        try:
+            hist = json.loads(self.settings.value("radio/history", "{}", type=str))
+        except Exception:
+            hist = {}
+        lst = hist.get(path, [])
+        if lst and lst[0][1] == title:
+            return
+        lst.insert(0, [time.strftime("%H.%M"), title])
+        hist[path] = lst[:50]
+        if len(hist) > 40:      # vanhimmat asemat pois
+            hist = dict(list(hist.items())[-40:])
+        self.settings.setValue("radio/history", json.dumps(hist, ensure_ascii=False))
+
+    def show_radio_history(self, url=None, name=None):
+        url = url or (self.state.get("path") or "")
+        name = name or self.radio_names.get(url) or self.radio.name_for(url) or "Netradio"
+        hist = self.radio_history(url)
+        box = QMessageBox(self)
+        box.setWindowTitle(f"Kappalehistoria – {name}")
+        if hist:
+            rows = "".join(f"<tr><td style='color:#8C8C8C;padding-right:12px'>{_esc(t)}</td><td>{_esc(s)}</td></tr>"
+                           for t, s in hist)
+            box.setText(f"<b>{_esc(name)}</b> – viimeksi soineet:<br><table cellspacing=3>{rows}</table>")
+            copy = box.addButton("Kopioi lista", QMessageBox.ActionRole)
+        else:
+            box.setText("Kappalehistoriaa ei ole vielä. Historia kertyy, kun asema lähettää soivan kappaleen nimen.")
+            copy = None
+        box.addButton("Sulje", QMessageBox.RejectRole)
+        box.exec()
+        if copy is not None and box.clickedButton() is copy:
+            QApplication.clipboard().setText("\n".join(f"{t}  {s}" for t, s in hist))
+
     def play_radio(self, url, name):
         self.radio_names[url] = name
+        self._last_icy = ""
         self.save_position()
         self.video.cmd("loadfile", url, "replace")
         self.video.set("pause", False)
@@ -1371,6 +1537,8 @@ class MainWindow(QMainWindow):
             "radio_favs": [{"name": f["name"], "url": f["url"]} for f in self.radio.favorites()],
             "has_next_episode": self.is_real_video() and self._next_entry() is not None,
             "intro_active": self.intro_active(),
+            "radio_history": [f"{t}  {s}" for t, s in self.radio_history(self.state.get("path") or "")[:15]]
+            if (self.state.get("path") or "").startswith("http") else [],
         }
 
     def on_remote_command(self, cmd, value):
@@ -2035,6 +2203,8 @@ class MainWindow(QMainWindow):
             self.rebuild_playlist()
             self.update_now_playing()
         elif name in ("media-title", "metadata"):
+            if name == "metadata":
+                self._record_radio_song(value)
             self.update_now_playing()
         elif name == "chapter-list":
             self.rebuild_chapter_menu(value or [])
@@ -2044,6 +2214,7 @@ class MainWindow(QMainWindow):
         elif name == "track-list":
             self.rebuild_track_menus(value or [])
             self.update_shaders()
+            self._smart_subtitles(value or [])
             self.update_now_playing()
         elif name == "volume":
             v = int(round(value or 0))
@@ -2214,6 +2385,12 @@ class MainWindow(QMainWindow):
         if path.startswith("http"):
             info["cover"] = self.radio.logo_for(path)
             self._cover_bytes = None
+            hist = self.radio_history(path)
+            if hist:
+                info["tracks"] = [(t, s, "") for t, s in hist[:30]]
+                info["current"] = 0
+                info["meta"] = "Viimeksi soineet"
+            return info
         local = bool(path) and "://" not in path and Path(path).exists()
         if local:
             t = self._tags(path)
@@ -2430,6 +2607,7 @@ class MainWindow(QMainWindow):
             self.showMaximized() if getattr(self, "_was_max", False) else self.showNormal()
             self.video.setFocus()
         self.refresh_icons()
+        QTimer.singleShot(200, self._place_next_card)
 
     def _place_overlays(self):
         from PySide6.QtCore import QRect
