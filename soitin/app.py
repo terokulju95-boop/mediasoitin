@@ -795,6 +795,7 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("&Ohje")
         m.addAction("Pikanäppäimet…", self.show_help)
         m.addAction("Tarkista päivitykset…", lambda: self.check_updates(silent=False))
+        m.addAction("Avaa virheloki", self.open_error_log)
         m.addAction("Tietoja", self.about)
 
     def _build_fullscreen(self):
@@ -1629,6 +1630,13 @@ class MainWindow(QMainWindow):
             self.video.cmd("write-watch-later-config")
 
     def add_paths(self, paths, play=False, replace=False):
+        # Yksi tiedosto avattuna (Resurssienhallinta, raahaus, Avaa-ikkuna):
+        # saman kansion muut tiedostot jonoon, jotta seuraava jakso / kappale jatkuu.
+        if (play and len(paths) == 1 and self.cfg.get("queue_folder")
+                and Path(paths[0]).is_file() and Path(paths[0]).suffix.lower() not in (".cda", ".iso")
+                and Path(paths[0]).suffix.lower().lstrip(".") not in ("m3u", "m3u8", "pls", "cue")):
+            self.play_file_in_context(str(paths[0]))
+            return
         files = []
         for path in paths:
             p = Path(path)
@@ -2191,6 +2199,13 @@ class MainWindow(QMainWindow):
                     "<p style='color:#8C8C8C'>Pikanäppäimiä voi muuttaa: Tiedosto → Asetukset → Pikanäppäimet.</p>")
         box.exec()
 
+    def open_error_log(self):
+        path = error_log_path()
+        if not path.exists():
+            QMessageBox.information(self, "Virheloki", "Virhelokissa ei ole merkintöjä – virheitä ei ole tapahtunut.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
     def about(self):
         QMessageBox.about(self, "Tietoja", f"<b>Mediasoitin {__version__}</b><br><br>"
                           "Toistomoottori: mpv / libmpv (FFmpeg).<br>"
@@ -2288,14 +2303,18 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, e):
         # Jos koko näytöstä poistutaan muuta kautta (esim. Win-näppäin), siivotaan tila.
-        # Reagoidaan vasta kun koko näyttö on ensin varmasti ollut päällä.
+        # Tarkistetaan viiveellä: Windows voi lähettää tilanvaihtoja välitilojen kautta.
         super().changeEvent(e)
         if e.type() == QEvent.WindowStateChange and self.fullscreen:
             if self.isFullScreen():
                 self._fs_confirmed = True
             elif getattr(self, "_fs_confirmed", False):
-                QTimer.singleShot(0, lambda: self.fullscreen and not self.isFullScreen()
-                                  and self.toggle_fullscreen())
+                QTimer.singleShot(600, self._check_left_fullscreen)
+
+    def _check_left_fullscreen(self):
+        if self.fullscreen and getattr(self, "_fs_confirmed", False) and not self.isFullScreen() \
+                and not (self.windowState() & Qt.WindowFullScreen):
+            self.toggle_fullscreen()
 
     # =================================================== Raahaa ja pudota
     def dragEnterEvent(self, e):
@@ -2340,9 +2359,35 @@ def _esc(s):
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def error_log_path():
+    d = Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation) or Path.home())
+    return d / "virheloki.txt"
+
+
+def install_error_log():
+    """Valmiissa exessä virheet eivät näy missään, joten ne kirjoitetaan lokitiedostoon."""
+    import datetime
+    import traceback
+
+    def hook(exc_type, exc, tb):
+        try:
+            path = error_log_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > 512 * 1024:
+                path.write_text("", encoding="utf-8")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"\n=== {datetime.datetime.now():%d.%m.%Y %H:%M:%S}  Mediasoitin {__version__} ===\n")
+                f.write("".join(traceback.format_exception(exc_type, exc, tb)))
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+    sys.excepthook = hook
+
+
 def main():
     import locale
     app = QApplication(sys.argv)
+    install_error_log()
     locale.setlocale(locale.LC_NUMERIC, "C")  # mpv vaatii tämän
     app.setApplicationName("Mediasoitin")
     theme.apply(app, Config().get("accent"))
