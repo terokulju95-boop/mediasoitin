@@ -1,4 +1,4 @@
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 # GitHub-repo, josta päivitykset haetaan (Releases-sivu)
 UPDATE_REPO = "terokulju95-boop/mediasoitin"

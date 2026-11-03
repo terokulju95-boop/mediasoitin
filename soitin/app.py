@@ -1250,6 +1250,7 @@ class MainWindow(QMainWindow):
     def update_remote_state(self):
         idle = self.state.get("idle-active", True)
         title = self.windowTitle().replace(" – Mediasoitin", "") if not idle else ""
+        title = strip_ext(title)
         artist = ""
         if not idle and self.video.album:
             title = self.video.album.get("title") or title
@@ -1771,7 +1772,7 @@ class MainWindow(QMainWindow):
             tg = self._tags(fn)
             if tg.get("title") and tg["title"] != Path(fn).stem:
                 name = f"{tg['artist']} – {tg['title']}" if tg.get("artist") else tg["title"]
-        return name
+        return strip_ext(name)
 
     def remove_selected(self):
         for r in sorted((self.pl_view.row(i) for i in self.pl_view.selectedItems()), reverse=True):
@@ -2350,6 +2351,13 @@ class MainWindow(QMainWindow):
         self.settings.setValue("volume", self.vol_slider.value())
         self.video.shutdown()
         super().closeEvent(e)
+
+def strip_ext(name):
+    """"10. Jakso.rife.mkv" -> "10. Jakso.rife" -> näytetään ilman tiedostopäätettä."""
+    from .media import MEDIA_EXT
+    base, dot, ext = str(name).rpartition(".")
+    return base if dot and base and ext.lower() in MEDIA_EXT else str(name)
+
 
 def _ass(s):
     return str(s).replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", " ")

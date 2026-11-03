@@ -32,6 +32,11 @@ input[type=range]{-webkit-appearance:none;appearance:none;width:calc(100% - 44px
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;border-radius:50%;background:var(--a)}
 input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;background:var(--a);border:0}
 .row{display:flex;justify-content:center;align-items:center;gap:10px;margin:16px 8px;flex-wrap:wrap}
+.transport{display:flex;justify-content:center;align-items:center;gap:min(2.5vw,12px);margin:16px 8px;flex-wrap:nowrap}
+.transport .btn{width:min(14vw,60px);height:min(14vw,60px);flex:0 0 auto}
+.transport .btn svg{width:min(6.5vw,26px);height:min(6.5vw,26px)}
+.transport #play{width:min(20vw,84px);height:min(20vw,84px)}
+.transport #play svg{width:min(9vw,36px);height:min(9vw,36px)}
 .btn{background:var(--s);color:var(--t);border:0;border-radius:50%;width:60px;height:60px;display:flex;
  align-items:center;justify-content:center;touch-action:manipulation;font-size:15px}
 .btn:active{background:#2a2a2a}
@@ -64,7 +69,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
   <div id="artist"></div>
   <div class="time"><span id="pos">0:00</span><span id="dur">0:00</span></div>
   <input type="range" id="seek" min="0" max="1000" value="0">
-  <div class="row">
+  <div class="transport">
    <button class="btn" onclick="cmd('seek',-10)"><svg viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6 8.5 6V6l-8.5 6z"/></svg></button>
    <button class="btn" onclick="cmd('prev')"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg></button>
    <button class="btn" id="play" onclick="cmd('toggle')"><svg id="pi" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
@@ -105,7 +110,7 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
 <script>
 const P=new URLSearchParams(location.search),K=P.get('k');
 const $=id=>document.getElementById(id);
-let st={},dragging=false,volDrag=false,lastCover='',fails=0;
+let st={},dragging=false,volDrag=false,lastCover=null,fails=0;
 if(window.Android){$('forget').style.display='block'}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x===b));
@@ -133,7 +138,8 @@ async function poll(){
  $('mute').textContent=st.mute?'🔇':'🔊';
  $('nextep').style.display=st.has_next_episode?'flex':'none';
  $('pi').innerHTML=st.paused?'<path d="M8 5v14l11-7z"/>':'<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>';
- if(st.cover_id!==lastCover){lastCover=st.cover_id;
+ const coverSig=(st.cover_id||'')+'|'+(st.video?1:0);
+ if(coverSig!==lastCover){lastCover=coverSig;
   if(st.cover_id){$('cover').style.backgroundImage=`url(/api/cover?k=${K}&v=${st.cover_id})`;$('cover').textContent=''}
   else{$('cover').style.backgroundImage='';$('cover').textContent=st.video?'▶':'♪'}}
  list($('list'),(st.playlist||[]).map((n,i)=>(i+1)+'. '+n),st.current,i=>cmd('play_index',i),'Soittolista on tyhjä.');
