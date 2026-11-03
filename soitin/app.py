@@ -1,4 +1,5 @@
 """Mediasoittimen pääikkuna."""
+import os
 import sys
 import time
 from pathlib import Path
@@ -332,8 +333,12 @@ class MainWindow(QMainWindow):
         if self.left_tabs.currentIndex() == 2:
             QTimer.singleShot(500, self.radio.ensure_loaded)
         self._build_next_card()
-        if self.cfg.get("remote_enabled") and self.remote.start(self.cfg.get("remote_port")):
-            self.remote_timer.start()
+        if self.cfg.get("remote_enabled"):
+            if self.remote.start(self.cfg.get("remote_port")):
+                self.remote_timer.start()
+            else:
+                QTimer.singleShot(1500, lambda: self.statusBar().showMessage(
+                    f"Kaukosäädin ei käynnistynyt: {self.remote.error} Onko soitin auki kahdesti?", 15000))
         if self.cfg.get("check_updates"):
             QTimer.singleShot(4000, lambda: self.check_updates(silent=True))
         self.rebuild_library()
@@ -1391,6 +1396,14 @@ class MainWindow(QMainWindow):
             return
         self._download_update(r)
 
+    def _quit_for_update(self):
+        """Soitin sulkeutuu kokonaan, jotta apuskripti voi vaihtaa tiedostot."""
+        self._updating = True
+        self.close()
+        QApplication.quit()
+        # varmistus: jos jokin taustasäie pitää ohjelman auki, lopetetaan väkisin
+        QTimer.singleShot(4000, lambda: os._exit(0))
+
     def _download_update(self, r):
         size = max(1, (r.get("size") or 0) // 2**20)
         dlg = QProgressDialog("Ladataan päivitystä…", "Peruuta", 0, size, self)
@@ -1407,8 +1420,13 @@ class MainWindow(QMainWindow):
         def ready(path):
             dlg.setLabelText("Asennetaan… soitin käynnistyy hetken kuluttua uudelleen.")
             QApplication.processEvents()
-            if updater.install_and_restart(path):
-                QTimer.singleShot(300, self.close)
+            try:
+                updater.install_and_restart(path)
+            except Exception as e:
+                dlg.close()
+                QMessageBox.warning(self, "Päivitys", f"Asennusta ei voitu käynnistää: {e}")
+                return
+            QTimer.singleShot(300, self._quit_for_update)
 
         def failed(msg):
             dlg.close()

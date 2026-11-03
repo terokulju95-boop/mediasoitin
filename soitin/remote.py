@@ -39,6 +39,40 @@ def local_ip():
         s.close()
 
 
+def fix_firewall():
+    """Sallii Mediasoittimen Windowsin palomuurissa (kysyy järjestelmänvalvojan luvan).
+    Poistaa ensin vanhat säännöt (myös mahdolliset estosäännöt) ja luo uuden sallivan säännön.
+    Palauttaa (onnistui, viesti)."""
+    import base64
+    import subprocess
+    import sys
+    if sys.platform != "win32":
+        return False, "Toimii vain Windowsissa."
+    exe = sys.executable
+    q = "'" + exe.replace("'", "''") + "'"
+    inner = (
+        f"Get-NetFirewallApplicationFilter -Program {q} -ErrorAction SilentlyContinue | "
+        "Get-NetFirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue; "
+        f"New-NetFirewallRule -DisplayName 'Mediasoitin (kaukosäädin)' -Direction Inbound -Program {q} "
+        "-Action Allow -Profile Any | Out-Null"
+    )
+    enc = base64.b64encode(inner.encode("utf-16-le")).decode("ascii")
+    outer = ("try { $p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -PassThru "
+             f"-ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','{enc}'; exit $p.ExitCode }} "
+             "catch { exit 1223 }")
+    try:
+        r = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", outer],
+                           creationflags=0x08000000, timeout=180,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return False, f"Palomuurin asetusta ei voitu muuttaa: {e}"
+    if r.returncode == 0:
+        return True, "Palomuuri sallii nyt Mediasoittimen. Kokeile hakua puhelimella uudelleen."
+    if r.returncode == 1223:
+        return False, "Lupaa ei annettu. Palomuurin asetusta ei muutettu."
+    return False, f"Palomuurin asetusta ei voitu muuttaa (virhekoodi {r.returncode})."
+
+
 def computer_name():
     return platform.node() or socket.gethostname() or "Tietokone"
 
@@ -328,6 +362,14 @@ class RemoteDialog(QDialog):
         self.dev_list.setMaximumHeight(110)
         rm = QPushButton("Poista valittu laite")
         rm.clicked.connect(self._remove_device)
+        self.fw_btn = QPushButton("Korjaa palomuuri")
+        self.fw_btn.setToolTip("Jos puhelin ei löydä tätä konetta: sallii Mediasoittimen Windowsin palomuurissa.\n"
+                               "Windows kysyy järjestelmänvalvojan luvan.")
+        self.fw_btn.clicked.connect(self._fix_firewall)
+        import sys as _sys
+        self.fw_btn.setVisible(_sys.platform == "win32")
+        self.status = QLabel()
+        self.status.setWordWrap(True)
         new_key = QPushButton("Vaihda QR-avain")
         new_key.setToolTip("Luo uuden QR-koodin. Vanhalla koodilla avatut selaimet eivät enää pääse ohjaamaan.")
         new_key.clicked.connect(self._new_key)
@@ -336,11 +378,12 @@ class RemoteDialog(QDialog):
         close.clicked.connect(self.close)
         btns = QHBoxLayout()
         btns.addWidget(rm)
+        btns.addWidget(self.fw_btn)
         btns.addWidget(new_key)
         btns.addStretch()
         btns.addWidget(close)
         lay = QVBoxLayout(self)
-        for w in (self.enable, self.app_info, self.qr, self.url, self.help, self.dev_title, self.dev_list):
+        for w in (self.enable, self.status, self.app_info, self.qr, self.url, self.help, self.dev_title, self.dev_list):
             lay.addWidget(w)
         lay.addLayout(btns)
         server.pair_finished.connect(lambda *_: self._refresh())
@@ -363,6 +406,15 @@ class RemoteDialog(QDialog):
         self.server.qs.setValue("remote/token", self.server.token)
         self._refresh()
 
+    def _fix_firewall(self):
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, msg = fix_firewall()
+        finally:
+            QApplication.restoreOverrideCursor()
+        (QMessageBox.information if ok else QMessageBox.warning)(self, "Palomuuri", msg)
+
     def _remove_device(self):
         it = self.dev_list.currentItem()
         if it and it.data(Qt.UserRole):
@@ -380,6 +432,12 @@ class RemoteDialog(QDialog):
             it.setFlags(Qt.NoItemFlags)
             self.dev_list.addItem(it)
         if self.server.running:
+            ip = local_ip()
+            ok_udp = self.server.udp is not None
+            self.status.setText(
+                f"<span style='color:#66bb6a'>●</span> Käynnissä: {computer_name()} · {ip}:{self.server.port}"
+                + ("" if ok_udp else "<br><span style='color:#ffb74d'>Automaattinen haku ei ole käytössä "
+                   "(portti 41234 varattu – onko soitin auki kahdesti?). Kirjoita osoite puhelimeen käsin.</span>"))
             self.app_info.setText(
                 "<b>Android-sovellus:</b> avaa Mediasoitin-kaukosäädin puhelimessa, niin se löytää tämän "
                 "koneen itse. Ensimmäisellä kerralla tähän ruutuun tulee koodi, jonka syötät puhelimeen.")
@@ -391,9 +449,11 @@ class RemoteDialog(QDialog):
             self.url.setText(url)
             self.help.setText(
                 "<b>Selaimella</b> (muut puhelimet): skannaa QR-koodi samasta wifistä.<br><br>"
-                "Jos puhelin ei löydä konetta, salli Mediasoitin Windowsin palomuurissa "
-                "(kysytään ensimmäisellä kerralla – valitse Yksityiset verkot).")
+                "<b>Jos puhelin ei löydä konetta:</b> paina <i>Korjaa palomuuri</i>. Näin käy usein, kun "
+                "soittimen uusi versio on purettu eri kansioon kuin aiemmin. Voit myös kirjoittaa "
+                "yllä näkyvän osoitteen puhelimen sovellukseen käsin.")
         else:
+            self.status.setText("<span style='color:#777'>●</span> Ei käytössä")
             self.qr.hide()
             self.app_info.setText("")
             self.url.setText(self.server.error or "")

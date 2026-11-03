@@ -97,6 +97,7 @@ class MainActivity : Activity() {
                 }
                 if (found == null && !revoked) {
                     val pc = Discovery.find(this).firstOrNull { it.id == prefs.id }
+                        ?: Discovery.find(this, 2500).firstOrNull { it.id == prefs.id }
                     if (pc != null) {
                         when (Api.ping(pc.host, pc.port, token)) {
                             200 -> {
@@ -118,7 +119,8 @@ class MainActivity : Activity() {
                     }
                     token.isNotEmpty() -> showSetup(
                         "Tietokonetta “${prefs.name}” ei löytynyt. Onko soitin auki ja kaukosäädin " +
-                            "käytössä (Näytä → Kaukosäädin puhelimesta)? Onko puhelin samassa wifissä?",
+                            "käytössä (Näytä → Kaukosäädin puhelimesta)? Jos soitin päivitettiin äsken, paina " +
+                            "tietokoneella kaukosäädinikkunassa “Korjaa palomuuri”.",
                         keepPairing = true
                     )
                     else -> showSetup(null)
@@ -246,8 +248,9 @@ class MainActivity : Activity() {
                     list.removeAllViews()
                     if (pcs.isEmpty()) {
                         list.addView(label(
-                            "Yhtään tietokonetta ei löytynyt. Tarkista, että soitin on auki, kaukosäädin " +
-                                "on käytössä ja Windowsin palomuuri sallii Mediasoittimen (yksityiset verkot).",
+                            "Yhtään tietokonetta ei löytynyt. Tarkista, että soitin on auki ja kaukosäädin on " +
+                                "käytössä. Jos ongelma jatkuu, paina tietokoneella soittimen kaukosäädinikkunassa " +
+                                "“Korjaa palomuuri”, tai kirjoita ikkunassa näkyvä osoite alle.",
                             14f, Color.parseColor("#FFB74D")))
                     }
                     for (pc in pcs) {

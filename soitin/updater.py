@@ -110,32 +110,49 @@ class UpdateDownloader(QThread):
             self.failed.emit(f"Lataus epäonnistui: {e}")
 
 
+def _ps_quote(path):
+    return "'" + str(path).replace("'", "''") + "'"
+
+
 def install_and_restart(new_dir):
-    """Käynnistää apuskriptin ja palauttaa True. Soittimen pitää sulkeutua heti tämän jälkeen."""
+    """Käynnistää piilotetun PowerShell-apuskriptin ja palauttaa True.
+    Skripti odottaa soittimen sulkeutumista, vaihtaa tiedostot ja käynnistää soittimen uudelleen.
+    Soittimen pitää sulkeutua heti tämän jälkeen."""
     dst = app_dir()
     src = Path(new_dir)
-    tmp_root = src.parent if src.parent.name.startswith("mediasoitin_update_") else src.parent.parent
-    bat = Path(tempfile.gettempdir()) / f"mediasoitin_paivitys_{os.getpid()}.cmd"
+    tmp_root = src
+    while tmp_root.parent != tmp_root and not tmp_root.name.startswith("mediasoitin_update_"):
+        tmp_root = tmp_root.parent
+    if not tmp_root.name.startswith("mediasoitin_update_"):
+        tmp_root = src.parent
     pid = os.getpid()
-    script = f"""@echo off
-chcp 65001 >nul
-rem Odotetaan, että Mediasoitin sulkeutuu
-:odota
-tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
-if not errorlevel 1 (
-  ping -n 2 127.0.0.1 >nul
-  goto odota
-)
-rem Uusi ohjelmakirjasto korvaa vanhan kokonaan, muut tiedostot kopioidaan päälle
-if exist "{src}\\_internal" robocopy "{src}\\_internal" "{dst}\\_internal" /MIR /R:5 /W:1 /NFL /NDL /NJH /NJS /NP >nul
-robocopy "{src}" "{dst}" /E /XD "{src}\\_internal" /R:5 /W:1 /NFL /NDL /NJH /NJS /NP >nul
-start "" "{dst}\\Mediasoitin.exe"
-rmdir /s /q "{tmp_root}" >nul 2>&1
-(goto) 2>nul & del "%~f0"
+    log = Path(tempfile.gettempdir()) / "mediasoitin_paivitys.log"
+    ps1 = Path(tempfile.gettempdir()) / f"mediasoitin_paivitys_{pid}.ps1"
+    q = _ps_quote
+    script = f"""$ErrorActionPreference = 'Continue'
+$log = {q(log)}
+"Päivitys alkoi $(Get-Date)" | Out-File -FilePath $log -Encoding utf8
+# Odotetaan, että Mediasoitin sulkeutuu (enintään 60 s)
+try {{ Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue }} catch {{}}
+Get-Process -Id {pid} -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 700
+$src = {q(src)}
+$dst = {q(dst)}
+if (Test-Path (Join-Path $src '_internal')) {{
+  robocopy (Join-Path $src '_internal') (Join-Path $dst '_internal') /MIR /R:10 /W:1 /NFL /NDL /NJH /NJS /NP | Out-File -FilePath $log -Append -Encoding utf8
+}}
+robocopy $src $dst /E /XD (Join-Path $src '_internal') /R:10 /W:1 /NFL /NDL /NJH /NJS /NP | Out-File -FilePath $log -Append -Encoding utf8
+"Kopiointi valmis (robocopy $LASTEXITCODE)" | Out-File -FilePath $log -Append -Encoding utf8
+Start-Process -FilePath (Join-Path $dst 'Mediasoitin.exe') -WorkingDirectory $dst
+Remove-Item -LiteralPath {q(tmp_root)} -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """
-    bat.write_text(script, encoding="utf-8")
-    flags = 0x08000000 | 0x00000008   # CREATE_NO_WINDOW | DETACHED_PROCESS
-    subprocess.Popen(["cmd.exe", "/c", str(bat)], creationflags=flags, close_fds=True)
+    ps1.write_text(script, encoding="utf-8-sig")     # BOM: Windows PowerShell lukee ääkköset oikein
+    CREATE_NO_WINDOW = 0x08000000                     # ei konsoli-ikkunaa (myöskään apuohjelmille)
+    subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                      "-WindowStyle", "Hidden", "-File", str(ps1)],
+                     creationflags=CREATE_NO_WINDOW, close_fds=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
 
 
