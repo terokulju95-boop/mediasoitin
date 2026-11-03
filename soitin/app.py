@@ -14,7 +14,9 @@ from PySide6.QtWidgets import (
     QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import __version__, cdaudio, library, theme, videoadjust
+from . import __version__, cdaudio, library, theme, updater, videoadjust
+from .radio import RadioPanel
+from .remote import RemoteDialog, RemoteServer
 from .dvdcopy import DvdCopyWorker, disc_size, safe_name, unique_folder
 from .preview import ThumbnailWorker
 from .drives import NETWORK, OPTICAL, REMOVABLE, list_drives, quick_locations
@@ -193,6 +195,45 @@ class PreviewPopup(QWidget):
             self.img.show()
 
 
+class NextCard(QWidget):
+    """“Seuraava jakso” -kortti videon oikeassa alakulmassa."""
+    play_now = Signal()
+    cancel = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground)
+        self.setObjectName("nextCard")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(6)
+        self.head = QLabel("SEURAAVA JAKSO")
+        self.head.setObjectName("nextHead")
+        self.name = QLabel("")
+        self.name.setObjectName("nextName")
+        self.name.setWordWrap(True)
+        self.count = QLabel("")
+        self.count.setObjectName("nextCount")
+        btns = QHBoxLayout()
+        self.now_btn = QToolButton(text="▶  Toista nyt")
+        self.now_btn.setObjectName("nextNow")
+        self.cancel_btn = QToolButton(text="Peruuta")
+        self.cancel_btn.setObjectName("nextCancel")
+        for b in (self.now_btn, self.cancel_btn):
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFocusPolicy(Qt.NoFocus)
+        self.now_btn.clicked.connect(self.play_now)
+        self.cancel_btn.clicked.connect(self.cancel)
+        btns.addWidget(self.now_btn)
+        btns.addWidget(self.cancel_btn)
+        btns.addStretch()
+        for w in (self.head, self.name, self.count):
+            lay.addWidget(w)
+        lay.addLayout(btns)
+        self.setFixedWidth(340)
+        self.hide()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, files=None):
         super().__init__()
@@ -242,6 +283,17 @@ class MainWindow(QMainWindow):
         self.thumbs.start()
         self._hover = None
         self.thumb_timer = QTimer(self, singleShot=True, interval=90, timeout=self._request_thumb)
+        self.radio_names = {}           # striimin osoite -> aseman nimi
+        self._next_state = "idle"       # idle / counting / dismissed
+        self._next_left = 0
+        self.next_timer = QTimer(self, interval=1000, timeout=self._next_tick)
+        self.remote = RemoteServer(self)
+        self.remote.command.connect(self.on_remote_command)
+        self.remote_dialog = None
+        self._cover_bytes = None
+        self.remote_timer = QTimer(self, interval=700, timeout=self.update_remote_state)
+        self.update_checker = None
+        self.update_dl = None
 
         self._build_ui()
         self._build_actions()
@@ -270,6 +322,13 @@ class MainWindow(QMainWindow):
         if geo is not None:
             self.restoreGeometry(geo)
         self.left_tabs.setCurrentIndex(self.settings.value("left_tab", 0, type=int))
+        if self.left_tabs.currentIndex() == 2:
+            QTimer.singleShot(500, self.radio.ensure_loaded)
+        self._build_next_card()
+        if self.cfg.get("remote_enabled") and self.remote.start(self.cfg.get("remote_port")):
+            self.remote_timer.start()
+        if self.cfg.get("check_updates"):
+            QTimer.singleShot(4000, lambda: self.check_updates(silent=True))
         self.rebuild_library()
         for name, sp in (("split_main", self.split_main), ("split_left", self.split_left)):
             st = self.settings.value(name)
@@ -412,6 +471,10 @@ class MainWindow(QMainWindow):
         self.left_tabs.setDocumentMode(True)
         self.left_tabs.addTab(self.split_left, "Selaa")
         self.left_tabs.addTab(self._build_library_panel(), "Kirjasto")
+        self.radio = RadioPanel(self.accent)
+        self.radio.play.connect(self.play_radio)
+        self.left_tabs.addTab(self.radio, "Radio")
+        self.left_tabs.currentChanged.connect(lambda i: i == 2 and self.radio.ensure_loaded())
         self.left_tabs.currentChanged.connect(lambda i: self.settings.setValue("left_tab", i))
         self.library_panel = self.left_tabs
         self.current_dir = ""
@@ -531,6 +594,7 @@ class MainWindow(QMainWindow):
             "aspect_cycle": self.cycle_aspect, "fill_toggle": self.toggle_fill,
             "deinterlace_toggle": self.toggle_deinterlace, "rotate": self.rotate_video,
             "library_search": self.focus_library_search,
+            "remote": self.open_remote, "next_episode_now": self.next_episode_now,
             "fullscreen": self.toggle_fullscreen, "fullscreen_alt": self.toggle_fullscreen,
             "exit_fullscreen": lambda: self.fullscreen and self.toggle_fullscreen(),
             "toggle_library": lambda: self.lib_action.toggle(),
@@ -707,6 +771,7 @@ class MainWindow(QMainWindow):
         self.status_action.toggled.connect(lambda on: self._toggle_panel(self.statusBar(), "show_status", on))
         m.addAction(A["video_only"])
         m.addAction(A["library_search"])
+        m.addAction(A["remote"])
         m.addSeparator()
         m.addAction(A["fullscreen"])
         self.show_all_action = QAction("Näytä kaikki tiedostot (myös tuntemattomat)", self, checkable=True)
@@ -719,6 +784,7 @@ class MainWindow(QMainWindow):
         # Ohje
         m = mb.addMenu("&Ohje")
         m.addAction("Pikanäppäimet…", self.show_help)
+        m.addAction("Tarkista päivitykset…", lambda: self.check_updates(silent=False))
         m.addAction("Tietoja", self.about)
 
     def _build_fullscreen(self):
@@ -743,8 +809,10 @@ class MainWindow(QMainWindow):
         self.mouse_timer = QTimer(self, interval=150, timeout=self._poll_mouse)
 
     def eventFilter(self, obj, e):
-        if obj is self.video and e.type() == QEvent.Resize and self.fullscreen:
-            self._place_overlays()
+        if obj is self.video and e.type() == QEvent.Resize:
+            if self.fullscreen:
+                self._place_overlays()
+            self._place_next_card()
         return super().eventFilter(obj, e)
 
     # ============================================================ Teema
@@ -1056,6 +1124,228 @@ class MainWindow(QMainWindow):
             self.preview.set_image(img)
             self.preview.adjustSize()
 
+    # ========================================================= Seuraava jakso
+    def _build_next_card(self):
+        self.next_card = NextCard(self.video)
+        self.next_card.play_now.connect(self.next_episode_now)
+        self.next_card.cancel.connect(self._cancel_next)
+
+    def _place_next_card(self):
+        c = self.next_card
+        c.adjustSize()
+        bottom = 24
+        if self.fullscreen and self.bottom_ov.shown():
+            bottom += self.bottom_ov.height()
+        c.move(self.video.width() - c.width() - 24, self.video.height() - c.height() - bottom)
+
+    def _next_entry(self):
+        pos = self.state.get("playlist-pos")
+        if pos is None or pos < 0 or pos + 1 >= len(self.playlist):
+            return None
+        if self.state.get("loop-file") not in (False, None, "no"):
+            return None
+        return self.playlist[pos + 1]
+
+    def _check_next_card(self, t):
+        if (not self.cfg.get("auto_next") or self._next_state != "idle" or t is None
+                or not self.is_real_video()):
+            return
+        dur = self.state.get("duration") or 0
+        if dur < 120:      # lyhyet videot ohitetaan
+            return
+        nxt = self._next_entry()
+        if nxt is None:
+            return
+        if dur - t <= self.cfg.get("next_offer"):
+            self._next_state = "counting"
+            self._next_left = self.cfg.get("next_countdown")
+            self.next_card.name.setText(self.entry_name(nxt))
+            self._update_next_label()
+            self._place_next_card()
+            self.next_card.show()
+            self.next_card.raise_()
+            self.next_timer.start()
+
+    def _update_next_label(self):
+        self.next_card.count.setText(f"Alkaa {self._next_left} sekunnin kuluttua"
+                                     if not self.state.get("pause") else "Tauolla")
+
+    def _next_tick(self):
+        if self._next_state != "counting":
+            self.next_timer.stop()
+            return
+        if self.state.get("pause"):
+            self._update_next_label()
+            return
+        self._next_left -= 1
+        if self._next_left <= 0:
+            self.next_episode_now()
+        else:
+            self._update_next_label()
+
+    def next_episode_now(self):
+        if self._next_entry() is None:
+            return
+        self._hide_next_card("idle")
+        self.video.cmd("playlist-next")
+
+    def _cancel_next(self):
+        self._hide_next_card("dismissed")
+        self.video.set("keep-open", "yes")    # jäädään jakson loppuun
+        self.video.toast("Seuraava jakso peruttu")
+
+    def _hide_next_card(self, state):
+        self._next_state = state
+        self.next_timer.stop()
+        self.next_card.hide()
+
+    # ========================================================= Netradio
+    def play_radio(self, url, name):
+        self.radio_names[url] = name
+        self.save_position()
+        self.video.cmd("loadfile", url, "replace")
+        self.video.set("pause", False)
+        self.video.toast(f"Netradio: {name}")
+
+    # ========================================================= Kaukosäädin
+    def open_remote(self):
+        if self.remote_dialog is None:
+            self.remote_dialog = RemoteDialog(self.remote, self.cfg, self)
+            self.remote_dialog.enable.toggled.connect(
+                lambda on: self.remote_timer.start() if self.remote.running else self.remote_timer.stop())
+        self.remote_dialog._refresh()
+        self.remote_dialog.show()
+        self.remote_dialog.raise_()
+
+    def update_remote_state(self):
+        idle = self.state.get("idle-active", True)
+        title = self.windowTitle().replace(" – Mediasoitin", "") if not idle else ""
+        artist = ""
+        if not idle and self.video.album:
+            title = self.video.album.get("title") or title
+            artist = self.video.album.get("artist") or ""
+        cover_id = ""
+        key = self._cover_bytes
+        if not idle and key and not self.is_real_video():
+            if not self.remote.cover or self.remote.cover[2] != key:
+                data = library.find_cover(key)
+                self.remote.cover = ("image/jpeg" if data and data[:3] == b"\xff\xd8\xff" else "image/png",
+                                     data, key) if data else None
+            cover_id = str(abs(hash(key)) % 10**8) if self.remote.cover else ""
+        names = [self.entry_name(e, i) for i, e in enumerate(self.playlist[:300])]
+        self.remote.state = {
+            "title": title or ("Ei toistoa" if idle else ""), "artist": artist,
+            "pos": self.state.get("time-pos") or 0, "dur": self.state.get("duration") or 0,
+            "paused": bool(self.state.get("pause")) or idle,
+            "volume": self.state.get("volume") if self.state.get("volume") is not None else self.vol_slider.value(),
+            "mute": bool(self.state.get("mute")), "playlist": names,
+            "current": self.state.get("playlist-pos") if self.state.get("playlist-pos") is not None else -1,
+            "cover_id": cover_id, "video": self.is_real_video(), "accent": self.accent,
+        }
+
+    def on_remote_command(self, cmd, value):
+        v = self.video
+        try:
+            if cmd == "toggle":
+                self.toggle_pause()
+            elif cmd == "next":
+                self.next()
+            elif cmd == "prev":
+                self.prev()
+            elif cmd == "stop":
+                self.stop()
+            elif cmd == "seek":
+                self.seek_by(int(value or 0))
+            elif cmd == "seek_abs":
+                v.cmd("seek", float(value or 0), "absolute+exact")
+            elif cmd == "volume":
+                v.set("volume", max(0, min(100, float(value or 0))))
+            elif cmd == "mute":
+                v.cmd("cycle", "mute")
+            elif cmd == "fullscreen":
+                self.toggle_fullscreen()
+            elif cmd == "play_index":
+                v.cmd("playlist-play-index", int(value))
+                v.set("pause", False)
+        except (TypeError, ValueError):
+            pass
+        QTimer.singleShot(100, self.update_remote_state)
+
+    # ========================================================= Päivitykset
+    def check_updates(self, silent=True):
+        if self.update_checker and self.update_checker.isRunning():
+            return
+        self.update_checker = updater.UpdateChecker(self)
+        self.update_checker.result.connect(lambda r: self._update_result(r, silent))
+        self.update_checker.start()
+
+    def _update_result(self, r, silent):
+        if r.get("error"):
+            if not silent:
+                QMessageBox.information(self, "Päivitykset", "Päivitysten tarkistus ei onnistunut.\n"
+                                        "Tarkista nettiyhteys.\n\n" + r["error"][:200])
+            return
+        ver = r.get("version", "")
+        if not updater.is_newer(ver):
+            if not silent:
+                QMessageBox.information(self, "Päivitykset", f"Käytössä on uusin versio ({__version__}).")
+            return
+        if silent and self.settings.value("update/skip", "", type=str) == ver:
+            return
+        notes = (r.get("notes") or "").strip()
+        box = QMessageBox(self)
+        box.setWindowTitle("Päivitys saatavilla")
+        box.setText(f"<b>Mediasoitin {ver.lstrip('v')} on saatavilla</b> (käytössä {__version__}).")
+        if notes:
+            box.setInformativeText(notes[:600])
+        upd = box.addButton("Päivitä nyt", QMessageBox.AcceptRole)
+        box.addButton("Myöhemmin", QMessageBox.RejectRole)
+        skip = box.addButton("Ohita tämä versio", QMessageBox.DestructiveRole)
+        box.setDefaultButton(upd)
+        box.exec()
+        if box.clickedButton() is skip:
+            self.settings.setValue("update/skip", ver)
+            return
+        if box.clickedButton() is not upd:
+            return
+        if not updater.can_self_update() or not r.get("url"):
+            QDesktopServices.openUrl(QUrl(r.get("page")))
+            return
+        if not updater.dir_writable():
+            QMessageBox.warning(self, "Päivitys", "Soittimen kansioon ei voi kirjoittaa "
+                                f"({updater.app_dir()}).\nSiirrä soitin esimerkiksi kansioon C:\\Ohjelmat\\Mediasoitin "
+                                "tai lataa päivitys käsin.")
+            QDesktopServices.openUrl(QUrl(r.get("page")))
+            return
+        self._download_update(r)
+
+    def _download_update(self, r):
+        size = max(1, (r.get("size") or 0) // 2**20)
+        dlg = QProgressDialog("Ladataan päivitystä…", "Peruuta", 0, size, self)
+        dlg.setWindowTitle("Päivitys")
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        d = updater.UpdateDownloader(r["url"], self)
+        self.update_dl = d
+        d.progress.connect(lambda c, t: (dlg.setMaximum(t), dlg.setValue(c),
+                                         dlg.setLabelText(f"Ladataan päivitystä…  {c} / {t} Mt")))
+        dlg.canceled.connect(d.abort)
+
+        def ready(path):
+            dlg.setLabelText("Asennetaan… soitin käynnistyy hetken kuluttua uudelleen.")
+            QApplication.processEvents()
+            if updater.install_and_restart(path):
+                QTimer.singleShot(300, self.close)
+
+        def failed(msg):
+            dlg.close()
+            QMessageBox.warning(self, "Päivitys", msg)
+
+        d.ready.connect(ready)
+        d.failed.connect(failed)
+        d.start()
+
     def refresh_icons(self):
         a, t = self.accent, theme.TEXT
         ico = ASSETS / "icon.png"
@@ -1077,6 +1367,8 @@ class MainWindow(QMainWindow):
         theme.apply(QApplication.instance(), self.accent)
         self.refresh_icons()
         self.rebuild_playlist()
+        self.radio.accent = self.accent
+        self.radio.rebuild()
         self._drive_sig = None
         self.refresh_drives()
         if self.state.get("idle-active", True):
@@ -1378,12 +1670,7 @@ class MainWindow(QMainWindow):
         bold = self.pl_view.font()
         bold.setBold(True)
         for i, e in enumerate(self.playlist):
-            name = display_name(e)
-            fn = e.get("filename", "")
-            if not e.get("title") and i < 500 and "://" not in fn and Path(fn).suffix.lower().lstrip(".") in library.LIB_AUDIO:
-                tg = self._tags(fn)
-                if tg.get("title") and tg["title"] != Path(fn).stem:
-                    name = f"{tg['artist']} – {tg['title']}" if tg.get("artist") else tg["title"]
+            name = self.entry_name(e, i)
             it = QListWidgetItem(f"{i + 1}.  {name}")
             it.setToolTip(e.get("filename", ""))
             if e.get("current"):
@@ -1395,6 +1682,18 @@ class MainWindow(QMainWindow):
                 it.setSelected(True)
         n = len(self.playlist)
         self.pl_title.setText(f"SOITTOLISTA  ·  {n}" if n else "SOITTOLISTA")
+
+    def entry_name(self, e, i=0):
+        """Soittolistarivin nimi: tagien kappaleen nimi ja artisti, radioasema tai tiedostonimi."""
+        fn = e.get("filename", "")
+        if fn in self.radio_names:
+            return self.radio_names[fn]
+        name = display_name(e)
+        if not e.get("title") and i < 500 and "://" not in fn and Path(fn).suffix.lower().lstrip(".") in library.LIB_AUDIO:
+            tg = self._tags(fn)
+            if tg.get("title") and tg["title"] != Path(fn).stem:
+                name = f"{tg['artist']} – {tg['title']}" if tg.get("artist") else tg["title"]
+        return name
 
     def remove_selected(self):
         for r in sorted((self.pl_view.row(i) for i in self.pl_view.selectedItems()), reverse=True):
@@ -1448,6 +1747,7 @@ class MainWindow(QMainWindow):
                 self.seek_slider.setValue(int((value or 0) * 1000))
                 self.seek_slider.blockSignals(False)
                 self.pos_label.setText(fmt_time(value) if value is not None else "0:00")
+            self._check_next_card(value)
         elif name == "duration":
             self.seek_slider.setRange(0, int((value or 0) * 1000))
             self.dur_label.setText(fmt_time(value) if value else "0:00")
@@ -1495,6 +1795,8 @@ class MainWindow(QMainWindow):
         elif name == "video-params":
             self.update_now_playing()
             self.update_audio_info()
+            if self.is_real_video() and not self.cfg.get("auto_next"):
+                self.video.set("keep-open", "yes")   # sarjan jakso jää loppuun eikä seuraava ala
             if (self.cfg.get("auto_fullscreen") and not self._auto_fs_done and not self.fullscreen
                     and self.is_real_video()):
                 self._auto_fs_done = True
@@ -1510,6 +1812,8 @@ class MainWindow(QMainWindow):
 
     def on_file_loaded(self):
         self._auto_fs_done = False
+        self._hide_next_card("idle")
+        self.video.set("keep-open", "no")
         if self.pending_chapter is not None:
             ch, self.pending_chapter = self.pending_chapter, None
             QTimer.singleShot(100, lambda: self.video.set("chapter", ch))
@@ -1586,10 +1890,15 @@ class MainWindow(QMainWindow):
         is_cd = path.startswith("cdtrack://")
         if is_cd:
             title = f"Kappale {path.rsplit('/', 1)[-1]}"
+        station = self.radio_names.get(path) or (self.radio.name_for(path) if path.startswith("http") else None)
         md = self.state.get("metadata") or {}
         low = {str(k).lower(): v for k, v in md.items()}
         artist = low.get("artist") or low.get("album_artist") or ""
         album = low.get("album") or ("Musiikki-CD" if is_cd else "")
+        if station:
+            icy = low.get("icy-title") or ""
+            title = icy or (title if title and title != path and "://" not in title else station)
+            artist, album = station, "Netradio"
         chs = self.state.get("chapter-list") or []
         ch = self.state.get("chapter")
         if len(chs) > 1 and ch is not None and 0 <= ch < len(chs):
@@ -1633,6 +1942,9 @@ class MainWindow(QMainWindow):
     def _album_info(self, path, title, artist, album, is_cd):
         """Albuminäkymän tiedot: kansikuva, nimet ja saman albumin kappaleet."""
         info = {"title": title, "artist": artist, "album": album, "cover": None, "tracks": [], "current": -1}
+        if path.startswith("http"):
+            info["cover"] = self.radio.logo_for(path)
+            self._cover_bytes = None
         local = bool(path) and "://" not in path and Path(path).exists()
         if local:
             t = self._tags(path)
@@ -1641,6 +1953,7 @@ class MainWindow(QMainWindow):
             al = t.get("album") or album
             info["album"] = f"{al}  ·  {t['year']}" if al and t.get("year") else al
             info["cover"] = self._cover(path)
+            self._cover_bytes = path
         ap = self.state.get("audio-params") or {}
         if ap:
             codec = (self.state.get("audio-codec-name") or "").upper()
@@ -1925,6 +2238,7 @@ class MainWindow(QMainWindow):
         if self.adjust_dialog:
             self.adjust_dialog.close()
         self.thumbs.stop()
+        self.remote.stop()
         if self.scanner and self.scanner.isRunning():
             self.scanner.abort()
             self.scanner.wait(2000)

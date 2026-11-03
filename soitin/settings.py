@@ -22,6 +22,13 @@ DEFAULTS = {
     "resume": False,             # jatka siitä mihin jäit
     "auto_fullscreen": False,    # koko näyttö kun video alkaa
     "hide_delay": 2.5,           # s, koko näytön palkit piiloon
+    "auto_next": True,           # seuraava jakso automaattisesti
+    "next_offer": 20,            # s ennen loppua: "Seuraava jakso" -kortti (lopputekstien ohitus)
+    "next_countdown": 10,        # s laskuri kortissa
+    # Muut
+    "check_updates": True,
+    "remote_enabled": False,
+    "remote_port": 8765,
     # Ääni
     "exclusive": False,
     "alang": "fin,fi,eng,en",
@@ -77,6 +84,8 @@ ACTIONS = [
     ("video_only", "Vain video", "Ctrl+0", "Näkymä"),
     ("file_info", "Tiedoston tekniset tiedot", "Ctrl+I", "Näkymä"),
     ("library_search", "Hae kirjastosta", "Ctrl+F", "Näkymä"),
+    ("remote", "Kaukosäädin puhelimesta", "Ctrl+K", "Näkymä"),
+    ("next_episode_now", "Seuraava jakso heti (ohita lopputekstit)", "N", "Toisto"),
     ("open_files", "Avaa tiedostoja", "Ctrl+O", "Tiedosto"),
     ("open_folder", "Avaa kansio", "Ctrl+Shift+O", "Tiedosto"),
     ("remove_selected", "Poista valitut soittolistasta", "Delete", "Tiedosto"),
@@ -127,6 +136,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._tab_subs(), "Tekstitys")
         tabs.addTab(self._tab_keys(), "Pikanäppäimet")
         tabs.addTab(self._tab_look(), "Ulkoasu")
+        tabs.addTab(self._tab_other(), "Muut")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         from PySide6.QtGui import QIcon
@@ -206,6 +216,12 @@ class SettingsDialog(QDialog):
         f.addRow("", self._check("queue_folder", "Tiedoston tuplaklikkaus laittaa saman kansion muut tiedostot jonoon"))
         f.addRow("", self._check("resume", "Jatka siitä mihin jäit (muistaa toistokohdan)"))
         f.addRow("", self._check("auto_fullscreen", "Siirry koko näytölle, kun video alkaa"))
+        f.addRow(self._note("<b>Sarjat</b>"))
+        f.addRow("", self._check("auto_next", "Toista seuraava jakso automaattisesti"))
+        f.addRow("Näytä “Seuraava jakso” -kortti:", self._spin("next_offer", 5, 600, " s ennen loppua"))
+        f.addRow("Laskuri ennen seuraavaa jaksoa:", self._spin("next_countdown", 3, 60, " s"))
+        f.addRow("", self._note("Kortin avulla lopputekstit voi ohittaa. Jos lopputekstit ovat pitkät, "
+                                "kasvata ensimmäistä aikaa (esim. 60–90 s)."))
         return page
 
     def _tab_audio(self):
@@ -305,6 +321,15 @@ class SettingsDialog(QDialog):
         f.addRow("", self._check("seek_preview", "Esikatselukuva aikajanan päällä (videot)"))
         f.addRow("", self._note("Paneelien näkyvyyttä voi muuttaa Näytä-valikosta (Ctrl + 1 / 2 / 0) "
                                 "ja kokoa vetämällä paneelien reunoja."))
+        return page
+
+    def _tab_other(self):
+        page, f = self._form()
+        f.addRow("", self._check("check_updates", "Tarkista päivitykset, kun soitin käynnistyy"))
+        f.addRow("", self._note("Kun uusi versio on saatavilla, soitin kysyy luvan, lataa sen ja "
+                                "käynnistyy uudelleen. Vanhaa versiota ei tarvitse poistaa itse."))
+        f.addRow("Kaukosäätimen portti:", self._spin("remote_port", 1024, 65535, ""))
+        f.addRow("", self._note("Kaukosäädin otetaan käyttöön kohdasta Näytä → Kaukosäädin puhelimesta."))
         return page
 
     def _accent_chosen(self, idx):

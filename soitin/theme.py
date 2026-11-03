@@ -125,6 +125,15 @@ QDialog QWidget {{ background: {SURFACE}; }}
 QWidget#preview {{ background: #000000; border: 1px solid {accent}; border-radius: 6px; }}
 QLabel#previewTime {{ color: {TEXT}; font-weight: bold; background: transparent; padding: 2px 6px; }}
 QTabWidget#leftTabs::pane {{ border: none; }}
+QWidget#nextCard {{ background: rgba(12,12,12,235); border: 1px solid {BORDER}; border-left: 3px solid {accent};
+    border-radius: 10px; }}
+QWidget#nextCard QLabel {{ background: transparent; }}
+QLabel#nextHead {{ color: {MUTED}; font-size: 8pt; font-weight: bold; letter-spacing: 1px; }}
+QLabel#nextName {{ color: #FFFFFF; font-size: 12pt; font-weight: bold; }}
+QLabel#nextCount {{ color: {MUTED}; }}
+QToolButton#nextNow {{ background: {accent}; color: #FFFFFF; padding: 6px 14px; border-radius: 6px; font-weight: bold; }}
+QToolButton#nextNow:hover {{ background: {accent_hover}; }}
+QToolButton#nextCancel {{ background: {SURFACE2}; padding: 6px 14px; border-radius: 6px; }}
 QTabWidget#leftTabs QTabBar::tab {{ padding: 8px 18px; }}
 QCheckBox {{ spacing: 8px; background: transparent; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid #555; border-radius: 4px; background: {BG}; }}
