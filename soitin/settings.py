@@ -31,6 +31,8 @@ DEFAULTS = {
     "check_updates": True,
     "remote_enabled": False,
     "remote_port": 8765,
+    "close_to_tray": True,       # ikkunan sulkeminen jättää soittimen ilmaisinalueelle
+    "autostart": False,          # käynnistyy Windowsin mukana taustalle (todellinen tila rekisterissä)
     # Ääni
     "exclusive": False,
     "alang": "fin,fi,eng,en",
@@ -348,6 +350,15 @@ class SettingsDialog(QDialog):
                                 "käynnistyy uudelleen. Vanhaa versiota ei tarvitse poistaa itse."))
         f.addRow("Kaukosäätimen portti:", self._spin("remote_port", 1024, 65535, ""))
         f.addRow("", self._note("Kaukosäädin otetaan käyttöön kohdasta Näytä → Kaukosäädin puhelimesta."))
+        f.addRow("", self._check("close_to_tray", "Ikkunan sulkeminen jättää soittimen taustalle (ilmaisinalueelle)"))
+        auto = self._check("autostart", "Käynnistä Windowsin mukana taustalle")
+        import sys
+        auto.setEnabled(sys.platform == "win32")
+        f.addRow("", auto)
+        f.addRow("", self._note("Taustalla soitin ei näy, mutta puhelimen kaukosäädin toimii: voit ohjata "
+                                "myös Netflixiä, YouTubea, Disney+:aa ja muita selaimessa Suoratoisto-välilehdeltä. "
+                                "Automaattinen käynnistys ottaa kaukosäätimen käyttöön. Soittimen saa auki "
+                                "ilmaisinalueen kuvakkeesta ja kokonaan kiinni kuvakkeen valikosta (Lopeta)."))
         return page
 
     def _accent_chosen(self, idx):

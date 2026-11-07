@@ -76,8 +76,21 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
 .star{all:unset;font-size:22px;padding:4px 6px;color:var(--m)}
 .star.on{color:var(--a)}
 .subh{color:var(--m);font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:14px 16px 4px}
+.stream{display:grid;grid-template-columns:1fr 1.25fr 1fr;gap:12px;margin:22px 12px 8px;align-items:center}
+.stream .btn,.sk .btn,.sv .btn{width:auto;height:auto;border-radius:20px;flex-direction:column;gap:6px;font-size:13px;color:var(--t)}
+.stream .btn{height:min(28vw,112px)}
+.stream .btn svg{width:34px;height:34px}
+.stream #spp{height:min(36vw,140px);background:var(--a);color:#fff}
+.stream #spp svg{width:52px;height:52px}
+.stream small,.sv small{color:var(--m);font-size:11px}
+.sk,.sv{display:grid;gap:10px;margin:10px 12px}
+.sk{grid-template-columns:1fr 1fr}.sv{grid-template-columns:1fr 1fr 1fr}
+.sk .btn,.sv .btn{height:60px;border-radius:16px;font-size:15px}
+.sv .btn{font-size:24px}
+.hint{color:var(--m);font-size:12px;text-align:center;margin:4px 16px 0;line-height:1.45}
 #toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);background:#222;color:#fff;padding:10px 16px;
- border-radius:20px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:8}
+ border-radius:20px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:8;
+ max-width:88vw;width:max-content;text-align:center;line-height:1.35}
 #off{display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);align-items:center;justify-content:center;
  text-align:center;padding:30px;color:var(--m);line-height:1.5;z-index:9}
 </style></head><body>
@@ -120,6 +133,36 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
   <div class="subh">Suosikit</div><div id="radio"></div>
   <div class="subh" id="rhead">Suomalaiset asemat</div><div id="rres"></div>
  </section>
+ <section class="page" id="p-stream">
+  <div class="hint" style="margin-top:14px">Netflix · YouTube · Disney+ · Viaplay · muut selaimessa</div>
+  <div class="stream">
+   <button class="btn" id="sback"><svg viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6 8.5 6V6l-8.5 6z"/></svg>Taakse</button>
+   <button class="btn" id="spp" onclick="sPlay()"><svg viewBox="0 0 24 24"><path d="M3 5v14l9-7zM14 5h3v14h-3zm5 0h3v14h-3z"/></svg></button>
+   <button class="btn" id="sfwd"><svg viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg>Eteen</button>
+  </div>
+  <div class="hint">Kelaus: YouTube 5 s, Netflix ja Disney+ 10 s. Pidä pohjassa, niin kelaus jatkuu.</div>
+  <div class="subh">Koko näyttö</div>
+  <div class="sk">
+   <button class="btn" onclick="st_('fullscreen')">⛶ Koko näyttö</button>
+   <button class="btn" onclick="st_('exit_fullscreen')">↙ Pienennä</button>
+  </div>
+  <div class="subh">Tietokoneen äänenvoimakkuus</div>
+  <div class="sv">
+   <button class="btn" id="svd">−</button>
+   <button class="btn" onclick="st_('mute')">🔇</button>
+   <button class="btn" id="svu">+</button>
+  </div>
+  <div class="subh">Jos jokin ei toimi</div>
+  <div class="sk">
+   <button class="btn" onclick="st_('f11')">F11 Selain koko näytölle</button>
+   <button class="btn" onclick="tab('p-pad')">🖱 Hiiri</button>
+  </div>
+  <div class="hint">Toisto ja tauko:</div>
+  <div class="seg"><button id="ppMedia" onclick="setPP('media')">Medianäppäin</button><button id="ppSpace" onclick="setPP('space')">Välilyönti</button></div>
+  <div class="hint">Medianäppäin toimii, vaikka selain ei olisi edessä. Jos tauko osuu väärään ohjelmaan
+   (esim. Spotify), valitse välilyönti. Nuolet ja koko näyttö menevät aina selaimeen: jos video ei tottele,
+   napauta videota kerran Hiiri-välilehdeltä.</div>
+ </section>
  <section class="page" id="p-pad">
   <div id="pad">Liikuta sormea: hiiri<br>Napauta: klikkaus · Kahdella sormella: rullaus<br>Kahden sormen napautus: oikea klikkaus</div>
   <div class="keys">
@@ -138,11 +181,12 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
  <button data-p="p-list"><svg viewBox="0 0 24 24"><path d="M3 6h13v2H3zm0 5h13v2H3zm0 5h9v2H3zm15-5v8.2A3 3 0 1 0 20 22V13h2v-2z"/></svg>Soittolista</button>
  <button data-p="p-browse"><svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8z"/></svg>Selaa</button>
  <button data-p="p-radio"><svg viewBox="0 0 24 24"><path d="M4 8h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1zm3 9a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zm6-4v2h6v-2zm-6.6-6.1L16.7 3l.7 1.9L8.6 8z"/></svg>Radio</button>
+ <button data-p="p-stream"><svg viewBox="0 0 24 24"><path d="M21 3H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5v2h8v-2h5a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 14H3V5h18zM10 7.5v7l5.5-3.5z"/></svg>Suoratoisto</button>
  <button data-p="p-pad"><svg viewBox="0 0 24 24"><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm0 2v9h14V5zm0 11v3h6.5v-3zm8 0v3H19v-3z"/></svg>Hiiri</button>
 </nav>
 </div>
 <div id="toast"></div>
-<div id="off">Yhteys soittimeen katkesi.<br><br>Onko soitin auki ja puhelin samassa wifissä?</div>
+<div id="off">Yhteys soittimeen katkesi.<br><br>Onko soitin käynnissä (myös taustalla) ja puhelin samassa wifissä?</div>
 <script>
 const P=new URLSearchParams(location.search),K=P.get('k');
 const $=id=>document.getElementById(id);
@@ -152,7 +196,7 @@ function tab(id){document.querySelectorAll('nav button').forEach(x=>x.classList.
  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id));$('txt').blur();
  if(id==='p-browse'&&!B.loaded)load('');if(id==='p-radio'&&!R.loaded)radioSearch('')}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.p));
-let toastT=0;function toast(t){const e=$('toast');e.textContent=t;e.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>e.style.opacity=0,1600)}
+let toastT=0;function toast(t,ms){const e=$('toast');e.textContent=t;e.style.opacity=1;clearTimeout(toastT);toastT=setTimeout(()=>e.style.opacity=0,ms||1600)}
 function esc(t){return String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 async function api(path){const r=await fetch(path+(path.includes('?')?'&':'?')+'k='+K,{cache:'no-store'});return r.json()}
 // ---- selaus
@@ -216,7 +260,21 @@ $('rq').addEventListener('keydown',e=>{if(e.key==='Enter'){clearTimeout(rT);radi
 function fmt(s){if(s==null||s<0)return'0:00';s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
  return h?`${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')}`:`${m}:${String(x).padStart(2,'0')}`}
 async function cmd(c,v){try{await fetch('/api/cmd?k='+K,{method:'POST',body:JSON.stringify({cmd:c,value:v})});
- if(!c.startsWith('mouse'))setTimeout(poll,150)}catch(e){}}
+ if(!c.startsWith('mouse'))setTimeout(poll,c==='stream'?300:150)}catch(e){}}
+// ---- suoratoisto (selaimen ohjaus)
+function st_(a){cmd('stream',a)}
+let PP='media';try{PP=localStorage.getItem('ppMode')||'media'}catch(e){}
+function setPP(m){PP=m;try{localStorage.setItem('ppMode',m)}catch(e){}
+ $('ppMedia').classList.toggle('on',m==='media');$('ppSpace').classList.toggle('on',m==='space')}
+setPP(PP);
+function sPlay(){st_(PP==='space'?'space':'playpause')}
+function repeat(el,fn){let t1=0,t2=0;const stop=()=>{clearTimeout(t1);clearInterval(t2)};
+ el.addEventListener('pointerdown',e=>{e.preventDefault();stop();fn();t1=setTimeout(()=>{t2=setInterval(fn,330)},550)});
+ ['pointerup','pointerleave','pointercancel'].forEach(n=>el.addEventListener(n,stop));
+ el.addEventListener('contextmenu',e=>e.preventDefault())}
+repeat($('sback'),()=>st_('back'));repeat($('sfwd'),()=>st_('fwd'));
+repeat($('svd'),()=>st_('vol_down'));repeat($('svu'),()=>st_('vol_up'));
+let noticeId=null,firstPoll=true;
 function sendText(){const t=$('txt').value;if(t){cmd('type',t);$('txt').value=''}}
 $('txt').addEventListener('keydown',e=>{if(e.key==='Enter'){sendText();cmd('key','enter')}});
 function list(el,items,cur,fn,empty){const sig=JSON.stringify([items,cur]);if(el.dataset.sig===sig)return;el.dataset.sig=sig;
@@ -228,6 +286,9 @@ async function poll(){
   st=await r.json();fails=0;$('off').style.display='none'}
  catch(e){if(++fails>2)$('off').style.display='flex';return}
  document.documentElement.style.setProperty('--a',st.accent||'#D35400');
+ if(noticeId!==null&&st.notice_id!==noticeId&&st.notice)toast(st.notice,3500);noticeId=st.notice_id||0;
+ // Soitin taustalla eikä toista mitään -> avataan suoraan suoratoiston ohjaus.
+ if(firstPoll){firstPoll=false;if(st.hidden&&st.title==='Ei toistoa')tab('p-stream')}
  $('title').textContent=st.title||'Ei toistoa';$('artist').textContent=st.artist||'';
  $('pos').textContent=fmt(st.pos);$('dur').textContent=fmt(st.dur);
  if(!dragging)$('seek').value=st.dur?Math.round(1000*st.pos/st.dur):0;

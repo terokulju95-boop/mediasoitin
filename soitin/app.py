@@ -12,13 +12,13 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QDesktopServi
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QFileSystemModel,
     QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QProgressDialog, QSlider, QSplitter, QStyle, QTabWidget,
+    QMainWindow, QMenu, QMessageBox, QProgressDialog, QSlider, QSplitter, QStyle, QSystemTrayIcon, QTabWidget,
     QToolButton, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import __version__, cdaudio, intro, library, subtitles, theme, updater, videoadjust
 from .radio import RadioPanel
-from . import inputsim
+from . import inputsim, tray
 from .remote import PairCodeDialog, RemoteDialog, RemoteServer
 from .dvdcopy import DvdCopyWorker, disc_size, safe_name, unique_folder
 from .preview import ThumbnailWorker
@@ -444,6 +444,93 @@ class MainWindow(QMainWindow):
         if files:
             QTimer.singleShot(300, lambda: self.add_paths(files, play=True))
 
+        self._really_quit = False
+        self._pending_update = None
+        self._build_tray()
+        tray.refresh_autostart()
+
+    # ========================================================= Ilmaisinalue
+    def _apply_autostart(self):
+        want = self.cfg.get("autostart")
+        if want != tray.autostart_enabled():
+            ok, msg = tray.set_autostart(want)
+            if not ok:
+                QMessageBox.warning(self, "Asetukset", msg)
+                self.cfg.set("autostart", tray.autostart_enabled())
+                return
+        if want and not self.remote.running:
+            # Taustalla käynnistymisestä ei ole hyötyä ilman kaukosäädintä.
+            if self.remote.start(self.cfg.get("remote_port")):
+                self.cfg.set("remote_enabled", True)
+                self.remote_timer.start()
+            else:
+                QMessageBox.warning(self, "Kaukosäädin", f"Kaukosäädin ei käynnistynyt: {self.remote.error}")
+
+    def _build_tray(self):
+        self.tray = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        t = QSystemTrayIcon(self.windowIcon(), self)
+        t.setToolTip("Mediasoitin")
+        m = QMenu(self)
+        m.addAction("Avaa Mediasoitin", self.show_from_tray)
+        self.tray_remote = m.addAction("Kaukosäädin puhelimesta…", lambda: (self.show_from_tray(), self.open_remote()))
+        m.addSeparator()
+        m.addAction("Lopeta", self.quit_app)
+        t.setContextMenu(m)
+        t.activated.connect(lambda r: self.show_from_tray()
+                            if r in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
+        t.messageClicked.connect(self.show_from_tray)
+        self.tray_menu = m
+        self.tray = t
+        t.show()
+
+    def keeps_running_in_tray(self):
+        return self.tray is not None and self.cfg.get("close_to_tray")
+
+    def show_from_tray(self):
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        if self._pending_update:
+            r, self._pending_update = self._pending_update, None
+            QTimer.singleShot(400, lambda: self._update_result(r, True))
+
+    def hide_to_tray(self):
+        """Ikkuna piiloon, soitin jää taustalle kaukosäädintä varten."""
+        if self.fullscreen:
+            self.toggle_fullscreen()
+        if not self.state.get("idle-active", True):
+            if self.cfg.get("resume"):
+                self.video.cmd("write-watch-later-config")
+            self.stop()                 # ei jätetä videota soimaan näkymättömiin
+        for dlg in (self.adjust_dialog, self.sub_dialog, self.remote_dialog):
+            if dlg:
+                dlg.close()
+        self.preview.hide()
+        self._save_window_state()
+        self.hide()
+        if not self.settings.value("tray/told", False, type=bool) and self.tray:
+            self.settings.setValue("tray/told", True)
+            self.tray.showMessage(
+                "Mediasoitin jäi taustalle",
+                "Kaukosäädin toimii edelleen. Avaa soitin tästä kuvakkeesta tai lopeta se kuvakkeen valikosta.",
+                QSystemTrayIcon.Information, 6000)
+
+    def quit_app(self):
+        self._really_quit = True
+        self.close()
+
+    def on_other_instance(self, files, show):
+        """Soitin käynnistettiin uudelleen, vaikka se oli jo auki (esim. tuplaklikattiin videota)."""
+        if show or files:
+            self.show_from_tray()
+        if files:
+            self.add_paths(files, play=True)
+
     def _mpv_options(self, volume):
         c = self.cfg
         opts = dict(
@@ -485,9 +572,11 @@ class MainWindow(QMainWindow):
 
     def open_settings(self):
         old_quality = self.cfg.get("quality")
+        self.cfg.set("autostart", tray.autostart_enabled())
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
             self.apply_settings()
+            self._apply_autostart()
             if self.cfg.get("quality") != old_quality:
                 QMessageBox.information(self, "Asetukset",
                                         "Kuvanlaadun muutos tulee voimaan, kun soitin käynnistetään uudelleen.")
@@ -703,7 +792,7 @@ class MainWindow(QMainWindow):
             "video_only": self.video_only, "file_info": self.show_file_info,
             "open_files": self.open_files_dialog, "open_folder": self.open_folder_dialog,
             "remove_selected": self.remove_selected, "settings": self.open_settings,
-            "quit": self.close,
+            "quit": self.quit_app,
         }
         self.act = {}
         for aid, label, _default, _group in ACTIONS:
@@ -1533,6 +1622,9 @@ class MainWindow(QMainWindow):
             "mute": bool(self.state.get("mute")), "playlist": names,
             "current": self.state.get("playlist-pos") if self.state.get("playlist-pos") is not None else -1,
             "cover_id": cover_id, "video": self.is_real_video(), "accent": self.accent,
+            "hidden": not self.isVisible(),
+            "notice_id": self._notice[0] if getattr(self, "_notice", None) else 0,
+            "notice": self._notice[1] if getattr(self, "_notice", None) else "",
             "radio": [f["name"] for f in self.radio.favorites()],
             "radio_favs": [{"name": f["name"], "url": f["url"]} for f in self.radio.favorites()],
             "has_next_episode": self.is_real_video() and self._next_entry() is not None,
@@ -1541,10 +1633,47 @@ class MainWindow(QMainWindow):
             if (self.state.get("path") or "").startswith("http") else [],
         }
 
+    # Kun soitin on piilossa eikä toista mitään, puhelimen tavalliset toistonapit (myös ilmoituksen
+    # ja äänenvoimakkuusnappien) ohjaavat selaimessa pyörivää suoratoistoa.
+    def _stream_fallback(self, cmd, value):
+        if not self.state.get("idle-active", True) or (self.isVisible() and not self.isMinimized()):
+            return None
+        try:
+            n = float(value or 0)
+        except (TypeError, ValueError):
+            n = 0
+        return {"toggle": "playpause", "play": "playpause", "pause": "playpause",
+                "mute": "mute", "fullscreen": "fullscreen",
+                "seek": "fwd" if n > 0 else "back" if n < 0 else None,
+                "volume_rel": "vol_up" if n > 0 else "vol_down" if n < 0 else None}.get(cmd)
+
+    def _stream(self, action):
+        if not inputsim.stream(action):
+            self._remote_notice("Selainta ei löytynyt. Avaa Netflix, YouTube tms. selaimessa.")
+
+    def _remote_notice(self, text):
+        self._notice = (self._notice[0] + 1 if getattr(self, "_notice", None) else 1, text)
+        self.update_remote_state()
+
+    # Komennot, jotka tarvitsevat soittimen ikkunan (videokuva piirretään vasta, kun ikkuna on näkyvissä).
+    _SHOW_FOR = {"play_index", "play_path", "play_paths", "next_episode", "show_window"}
+
     def on_remote_command(self, cmd, value):
         v = self.video
         try:
-            if cmd == "toggle":
+            if cmd == "stream":
+                self._stream(str(value))
+                QTimer.singleShot(100, self.update_remote_state)
+                return
+            fb = self._stream_fallback(cmd, value)
+            if fb:
+                self._stream(fb)
+                return
+            if cmd in self._SHOW_FOR or (cmd == "fullscreen" and not self.isVisible()):
+                self.show_from_tray()
+            if cmd == "show_window":
+                pass
+            elif cmd == "toggle":
                 self.toggle_pause()
             elif cmd == "play":
                 if self.state.get("pause") or self.state.get("idle-active", True):
@@ -1695,6 +1824,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Päivitykset", f"Käytössä on uusin versio ({__version__}).")
             return
         if silent and self.settings.value("update/skip", "", type=str) == ver:
+            return
+        if silent and not self.isVisible():
+            # Soitin on taustalla: ei avata ikkunaa kesken elokuvan, kysytään kun soitin avataan.
+            self._pending_update = r
+            if self.tray:
+                self.tray.showMessage("Mediasoitin", f"Uusi versio {ver.lstrip('v')} on saatavilla. "
+                                      "Avaa soitin päivittääksesi.", QSystemTrayIcon.Information, 6000)
             return
         notes = (r.get("notes") or "").strip()
         box = QMessageBox(self)
@@ -2691,7 +2827,20 @@ class MainWindow(QMainWindow):
         if paths:
             self.add_paths(paths, play=True)
 
+    def _save_window_state(self):
+        if not self.isVisible():
+            return
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("split_main", self.split_main.saveState())
+        self.settings.setValue("split_left", self.split_left.saveState())
+        self.settings.setValue("volume", self.vol_slider.value())
+
     def closeEvent(self, e):
+        if (not self._really_quit and not getattr(self, "_updating", False)
+                and self.keeps_running_in_tray()):
+            e.ignore()
+            self.hide_to_tray()
+            return
         if self.fullscreen:
             self.toggle_fullscreen()
         self.preview.close()
@@ -2709,12 +2858,12 @@ class MainWindow(QMainWindow):
             self.dvd_worker.wait(3000)
         if self.cfg.get("resume"):
             self.video.cmd("write-watch-later-config")
-        self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("split_main", self.split_main.saveState())
-        self.settings.setValue("split_left", self.split_left.saveState())
-        self.settings.setValue("volume", self.vol_slider.value())
+        self._save_window_state()
+        if self.tray:
+            self.tray.hide()
         self.video.shutdown()
         super().closeEvent(e)
+        QApplication.quit()
 
 def strip_ext(name):
     """"10. Jakso.rife.mkv" -> "10. Jakso.rife" -> näytetään ilman tiedostopäätettä."""
@@ -2764,6 +2913,13 @@ def main():
     app.setApplicationName("Mediasoitin")
     theme.apply(app, Config().get("accent"))
     files = [a for a in sys.argv[1:] if not a.startswith("-")]
+    hidden = tray.HIDDEN_ARG in sys.argv
+    if tray.send_to_running(files, show=not hidden):
+        sys.exit(0)                     # soitin oli jo auki: se avaa tiedostot
+    instance = tray.InstanceServer()
+    app.setQuitOnLastWindowClosed(False)   # ikkunan sulkeminen vie ilmaisinalueelle
     w = MainWindow(files)
-    w.show()
+    instance.message.connect(w.on_other_instance)
+    if not (hidden and w.tray and w.cfg.get("remote_enabled")):
+        w.show()
     sys.exit(app.exec())

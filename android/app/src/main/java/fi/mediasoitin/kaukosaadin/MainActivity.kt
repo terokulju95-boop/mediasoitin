@@ -118,7 +118,7 @@ class MainActivity : Activity() {
                         showSetup("Laitepari on poistettu tietokoneelta. Muodosta uusi laitepari.")
                     }
                     token.isNotEmpty() -> showSetup(
-                        "Tietokonetta “${prefs.name}” ei löytynyt. Onko soitin auki ja kaukosäädin " +
+                        "Tietokonetta “${prefs.name}” ei löytynyt. Onko soitin käynnissä (myös taustalla) ja kaukosäädin " +
                             "käytössä (Näytä → Kaukosäädin puhelimesta)? Jos soitin päivitettiin äsken, paina " +
                             "tietokoneella kaukosäädinikkunassa “Korjaa palomuuri”.",
                         keepPairing = true
@@ -227,6 +227,7 @@ class MainActivity : Activity() {
             col.addView(label("Valitse tietokone", 18f, text, true).also { it.setPadding(0, dp(18), 0, dp(4)) })
             col.addView(label(
                 "Avaa soitin tietokoneella ja ota kaukosäädin käyttöön: Näytä → Kaukosäädin puhelimesta. " +
+                    "Asetuksista soittimen saa käynnistymään Windowsin mukana taustalle. " +
                     "Puhelimen pitää olla samassa wifissä.", 14f, muted))
             val list = LinearLayout(this)
             list.orientation = LinearLayout.VERTICAL
@@ -248,7 +249,7 @@ class MainActivity : Activity() {
                     list.removeAllViews()
                     if (pcs.isEmpty()) {
                         list.addView(label(
-                            "Yhtään tietokonetta ei löytynyt. Tarkista, että soitin on auki ja kaukosäädin on " +
+                            "Yhtään tietokonetta ei löytynyt. Tarkista, että soitin on käynnissä (myös taustalla) ja kaukosäädin on " +
                                 "käytössä. Jos ongelma jatkuu, paina tietokoneella soittimen kaukosäädinikkunassa " +
                                 "“Korjaa palomuuri”, tai kirjoita ikkunassa näkyvä osoite alle.",
                             14f, Color.parseColor("#FFB74D")))
