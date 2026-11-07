@@ -76,18 +76,22 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
 .star{all:unset;font-size:22px;padding:4px 6px;color:var(--m)}
 .star.on{color:var(--a)}
 .subh{color:var(--m);font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:14px 16px 4px}
-.stream{display:grid;grid-template-columns:1fr 1.25fr 1fr;gap:12px;margin:22px 12px 8px;align-items:center}
-.stream .btn,.sk .btn,.sv .btn{width:auto;height:auto;border-radius:20px;flex-direction:column;gap:6px;font-size:13px;color:var(--t)}
-.stream .btn{height:min(28vw,112px)}
-.stream .btn svg{width:34px;height:34px}
-.stream #spp{height:min(36vw,140px);background:var(--a);color:#fff}
-.stream #spp svg{width:52px;height:52px}
-.stream small,.sv small{color:var(--m);font-size:11px}
-.sk,.sv{display:grid;gap:10px;margin:10px 12px}
-.sk{grid-template-columns:1fr 1fr}.sv{grid-template-columns:1fr 1fr 1fr}
-.sk .btn,.sv .btn{height:60px;border-radius:16px;font-size:15px}
-.sv .btn{font-size:24px}
+#p-stream.on{display:flex;flex-direction:column;height:100%;min-height:470px;padding-bottom:18px}
+#scard{width:min(64vw,300px);flex:0 1 300px;min-height:70px;margin:8px auto 0;border-radius:14px;background:#141414;
+ display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:var(--a)}
+#scard svg{height:42%;max-height:110px;width:auto;fill:currentColor}
+#p-stream #title{margin-top:14px}
+body.top #toast{bottom:auto;top:52px}
+#scard div{color:var(--m);font-size:13px;text-align:center;padding:0 14px;line-height:1.4}
 .hint{color:var(--m);font-size:12px;text-align:center;margin:4px 16px 0;line-height:1.45}
+.spacer{flex:1 1 0;min-height:6px}
+#p-stream .transport{gap:min(7vw,30px);margin-top:20px}
+#p-stream #sback,#p-stream #sfwd{width:min(18vw,72px);height:min(18vw,72px)}
+#p-stream #sback svg,#p-stream #sfwd svg{width:min(8vw,32px);height:min(8vw,32px)}
+.svol{display:flex;justify-content:center;align-items:center;gap:14px;margin:6px 22px}
+.svol .btn{font-size:26px}
+.seg.small{margin:10px auto 0;width:min(78vw,320px)}
+.seg.small button{padding:6px;font-size:12px}
 #toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);background:#222;color:#fff;padding:10px 16px;
  border-radius:20px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:8;
  max-width:88vw;width:max-content;text-align:center;line-height:1.35}
@@ -134,34 +138,23 @@ input[type=range]::-moz-range-thumb{width:24px;height:24px;border-radius:50%;bac
   <div class="subh" id="rhead">Suomalaiset asemat</div><div id="rres"></div>
  </section>
  <section class="page" id="p-stream">
-  <div class="hint" style="margin-top:14px">Netflix · YouTube · Disney+ · Viaplay · muut selaimessa</div>
-  <div class="stream">
-   <button class="btn" id="sback"><svg viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6 8.5 6V6l-8.5 6z"/></svg>Taakse</button>
-   <button class="btn" id="spp" onclick="sPlay()"><svg viewBox="0 0 24 24"><path d="M3 5v14l9-7zM14 5h3v14h-3zm5 0h3v14h-3z"/></svg></button>
-   <button class="btn" id="sfwd"><svg viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg>Eteen</button>
-  </div>
-  <div class="hint">Kelaus: YouTube 5 s, Netflix ja Disney+ 10 s. Pidä pohjassa, niin kelaus jatkuu.</div>
-  <div class="subh">Koko näyttö</div>
-  <div class="sk">
-   <button class="btn" onclick="st_('fullscreen')">⛶ Koko näyttö</button>
-   <button class="btn" onclick="st_('exit_fullscreen')">↙ Pienennä</button>
-  </div>
-  <div class="subh">Tietokoneen äänenvoimakkuus</div>
-  <div class="sv">
+  <div id="scard"><svg viewBox="0 0 24 24"><path d="M21 3H3a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5v2h8v-2h5a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 14H3V5h18zM10 7.5v7l5.5-3.5z"/></svg>
+   <div>Netflix · YouTube · Disney+<br>Viaplay · muut selaimessa</div></div>
+  <div id="title">Suoratoisto</div>
+  <div class="hint">Kelaus: YouTube 5 s, Netflix ja Disney+ 10 s.<br>Pidä nuolta pohjassa, niin kelaus jatkuu.</div>
+  <div class="seg small"><button id="ppMedia" onclick="setPP('media')">Tauko: medianäppäin</button><button id="ppSpace" onclick="setPP('space')">Tauko: välilyönti</button></div>
+  <div class="spacer"></div>
+  <div class="row"><button class="btn pill" onclick="st_('fullscreen')">⛶ Koko näyttö</button></div>
+  <div class="svol">
    <button class="btn" id="svd">−</button>
-   <button class="btn" onclick="st_('mute')">🔇</button>
+   <button class="btn" onclick="st_('mute')" style="font-size:20px">🔇</button>
    <button class="btn" id="svu">+</button>
   </div>
-  <div class="subh">Jos jokin ei toimi</div>
-  <div class="sk">
-   <button class="btn" onclick="st_('f11')">F11 Selain koko näytölle</button>
-   <button class="btn" onclick="tab('p-pad')">🖱 Hiiri</button>
+  <div class="transport">
+   <button class="btn" id="sback"><svg viewBox="0 0 24 24"><path d="M11 18V6l-8.5 6 8.5 6zm.5-6 8.5 6V6l-8.5 6z"/></svg></button>
+   <button class="btn" id="spp" onclick="sPlay()" style="width:min(22vw,92px);height:min(22vw,92px);background:var(--a);color:#fff"><svg viewBox="0 0 24 24" style="width:min(10vw,40px);height:min(10vw,40px)"><path d="M3 5v14l9-7zM14 5h3v14h-3zm5 0h3v14h-3z"/></svg></button>
+   <button class="btn" id="sfwd"><svg viewBox="0 0 24 24"><path d="M4 18l8.5-6L4 6v12zm9-12v12l8.5-6L13 6z"/></svg></button>
   </div>
-  <div class="hint">Toisto ja tauko:</div>
-  <div class="seg"><button id="ppMedia" onclick="setPP('media')">Medianäppäin</button><button id="ppSpace" onclick="setPP('space')">Välilyönti</button></div>
-  <div class="hint">Medianäppäin toimii, vaikka selain ei olisi edessä. Jos tauko osuu väärään ohjelmaan
-   (esim. Spotify), valitse välilyönti. Nuolet ja koko näyttö menevät aina selaimeen: jos video ei tottele,
-   napauta videota kerran Hiiri-välilehdeltä.</div>
  </section>
  <section class="page" id="p-pad">
   <div id="pad">Liikuta sormea: hiiri<br>Napauta: klikkaus · Kahdella sormella: rullaus<br>Kahden sormen napautus: oikea klikkaus</div>
@@ -192,7 +185,7 @@ const P=new URLSearchParams(location.search),K=P.get('k');
 const $=id=>document.getElementById(id);
 let st={},dragging=false,volDrag=false,lastCover=null,fails=0;
 if(window.Android){$('forget').style.display='block'}
-function tab(id){document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.p===id));
+function tab(id){document.body.classList.toggle('top',id==='p-stream');document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.p===id));
  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('on',p.id===id));$('txt').blur();
  if(id==='p-browse'&&!B.loaded)load('');if(id==='p-radio'&&!R.loaded)radioSearch('')}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.p));
