@@ -1,0 +1,112 @@
+# Rakentaa Windows-soittimen ja Android-kaukosäätimen.
+# - Jokainen push: valmiit paketit löytyvät Actions-välilehdeltä (Artifacts).
+# - Kun versionumero kasvaa tiedostossa soitin/__init__.py, molemmat julkaistaan
+#   automaattisesti Releases-sivulle. Soitin ja sovellus päivittävät itsensä sieltä.
+name: Rakenna Mediasoitin
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows-soitin
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Asenna riippuvuudet
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Lataa libmpv (toistomoottori)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./tools/hae_libmpv.ps1
+
+      - name: Rakenna Mediasoitin.exe
+        run: >
+          pyinstaller --noconfirm --windowed --name Mediasoitin
+          --icon soitin/assets/mediasoitin.ico
+          --add-data "soitin/assets;soitin/assets"
+          --add-data "soitin/shaders;soitin/shaders"
+          --add-binary "libmpv-2.dll;."
+          mediasoitin.py
+
+      - name: Pakkaa
+        shell: pwsh
+        run: Compress-Archive -Path dist/Mediasoitin/* -DestinationPath Mediasoitin-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mediasoitin-windows-x64
+          path: Mediasoitin-windows-x64.zip
+
+  android:
+    name: Android-kaukosäädin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Android SDK on valmiiksi asennettuna GitHubin Linux-koneissa (ANDROID_HOME).
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Rakenna APK
+        run: |
+          gradle -p android assembleRelease --no-daemon --stacktrace
+          cp android/app/build/outputs/apk/release/app-release.apk Mediasoitin-kaukosaadin.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mediasoitin-kaukosaadin
+          path: Mediasoitin-kaukosaadin.apk
+
+  release:
+    name: Julkaise uusi versio
+    needs: [windows, android]
+    # Julkaistaan, vaikka Android-rakennus epäonnistuisi (soitin julkaistaan silti).
+    if: always() && needs.windows.result == 'success' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Luo julkaisu, jos versio on uusi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' soitin/__init__.py)
+          if gh release view "v$v" >/dev/null 2>&1; then
+            # Versio on jo julkaistu: lisätään Android-sovellus, jos se puuttuu tai on korjattu.
+            if [ -f dist/Mediasoitin-kaukosaadin.apk ]; then
+              gh release upload "v$v" dist/Mediasoitin-kaukosaadin.apk --clobber
+              echo "Android-sovellus lisätty julkaisuun v$v."
+            else
+              echo "Versio v$v on jo julkaistu - ei muutoksia."
+            fi
+            exit 0
+          fi
+          files="dist/Mediasoitin-windows-x64.zip"
+          [ -f dist/Mediasoitin-kaukosaadin.apk ] && files="$files dist/Mediasoitin-kaukosaadin.apk"
+          gh release create "v$v" $files --title "Mediasoitin $v" --notes "$(git log -1 --pretty=%B)"
