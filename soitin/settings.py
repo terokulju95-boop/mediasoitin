@@ -1,10 +1,11 @@
 """Asetukset: oletusarvot, pikanäppäimet ja asetusikkuna."""
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QEvent, QSettings, Qt
 from PySide6.QtGui import QColor, QKeySequence
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QFormLayout, QHBoxLayout, QHeaderView, QKeySequenceEdit, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QSpinBox, QTableWidget, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QKeySequenceEdit, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox, QTableWidget, QTabWidget, QVBoxLayout,
+    QWidget,
 )
 
 from . import theme
@@ -136,13 +137,13 @@ class SettingsDialog(QDialog):
         self.accent = cfg.get("accent")
 
         tabs = QTabWidget()
-        tabs.addTab(self._tab_playback(), "Toisto")
-        tabs.addTab(self._tab_audio(), "Ääni")
-        tabs.addTab(self._tab_video(), "Kuva")
-        tabs.addTab(self._tab_subs(), "Tekstitys")
-        tabs.addTab(self._tab_keys(), "Pikanäppäimet")
-        tabs.addTab(self._tab_look(), "Ulkoasu")
-        tabs.addTab(self._tab_other(), "Muut")
+        # Jokainen välilehti rullattavaksi: muuten pisin välilehti venyttää ikkunan näyttöä
+        # korkeammaksi ja Tallenna-nappi jää näytön alareunan alle.
+        for page, name in ((self._tab_playback(), "Toisto"), (self._tab_audio(), "Ääni"),
+                           (self._tab_video(), "Kuva"), (self._tab_subs(), "Tekstitys"),
+                           (self._tab_keys(), "Pikanäppäimet"), (self._tab_look(), "Ulkoasu"),
+                           (self._tab_other(), "Muut")):
+            tabs.addTab(self._scrollable(page), name)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         from PySide6.QtGui import QIcon
@@ -155,8 +156,52 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(tabs)
+        lay.addWidget(tabs, 1)
         lay.addWidget(buttons)
+        self._fit_to_screen(parent)
+        # Hiiren rulla rullaa sivua eikä muuta vahingossa sen kentän arvoa, jonka päällä osoitin on.
+        for wdg in self.findChildren(QWidget):
+            if isinstance(wdg, (QAbstractSpinBox, QComboBox, QSlider)):
+                wdg.setFocusPolicy(Qt.StrongFocus)
+                wdg.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Wheel and not obj.hasFocus():
+            area = obj.parent()
+            while area is not None and not isinstance(area, QScrollArea):
+                area = area.parent()
+            if area is not None:
+                QApplication.sendEvent(area.verticalScrollBar(), ev)
+            return True
+        return super().eventFilter(obj, ev)
+
+    def _scrollable(self, page):
+        area = QScrollArea()
+        area.setWidget(page)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.viewport().setAutoFillBackground(False)
+        page.setAutoFillBackground(False)
+        return area
+
+    def _fit_to_screen(self, parent):
+        """Ikkuna mahtuu aina näytölle (myös pienellä näytöllä tai suurella tekstikoolla)."""
+        screen = (parent.screen() if parent is not None else None) or QApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        w = min(self.width(), avail.width() - 40)
+        h = min(self.height(), avail.height() - 60)
+        self.setMaximumHeight(avail.height())
+        self.resize(w, h)
+        if parent is not None and parent.isVisible():
+            c = parent.frameGeometry().center()
+        else:
+            c = avail.center()
+        x = max(avail.left(), min(c.x() - w // 2, avail.right() - w))
+        y = max(avail.top(), min(c.y() - h // 2 - 20, avail.bottom() - h - 30))
+        self.move(x, y)
 
     # ---- apurit
     def _form(self):
