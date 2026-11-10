@@ -1,5 +1,6 @@
 # libmpv-2.dll:n lukitus. tools/hae_libmpv.ps1 lataa VAIN tämän paketin ja tarkistaa sen SHA-256-summan.
 # Jos rivit ovat tyhjiä, skripti lataa uusimman paketin ja tulostaa GitHub-ajon yhteenvetoon rivit,
 # jotka kopioidaan tähän. Sen jälkeen jokainen rakennus käyttää täsmälleen samaa tarkistettua pakettia.
-url=
-sha256=
+# Lukittu 10.11.2026 (julkaisu 20261110). Uudempaan vaihtaminen: tyhjennä rivit, aja Actions ja kopioi uudet rivit.
+url=https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261110/mpv-dev-x86_64-20261110-git-a61f6c3abd.7z
+sha256=f07b97a72f2394a7798d6e1d36d952bbfd63577e25cef051f716751ea5dc9688

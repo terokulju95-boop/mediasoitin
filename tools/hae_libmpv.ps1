@@ -92,7 +92,8 @@ foreach ($rel in $releases) {
         $pin = "url=$($asset.browser_download_url)`nsha256=$sha"
         Write-Host "Lukitusrivit tiedostoon tools/libmpv.lock:`n$pin"
         if ($env:GITHUB_STEP_SUMMARY) {
-            "### libmpv: kopioi nämä rivit tiedostoon tools/libmpv.lock`n``````n$pin`n``````" |
+            $fence = '```'
+            "### libmpv: kopioi nämä rivit tiedostoon tools/libmpv.lock`n$fence`n$pin`n$fence" |
                 Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
         }
         exit 0
