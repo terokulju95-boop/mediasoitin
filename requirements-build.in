@@ -1,0 +1,7 @@
+# Rakennuksen suorat riippuvuudet. Tarkat versiot ja tarkistussummat: requirements-lock.txt
+PySide6
+mpv
+mutagen
+qrcode
+numpy
+pyinstaller

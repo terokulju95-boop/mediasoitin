@@ -2,6 +2,10 @@
 # Käyttö PowerShellissä projektikansiossa:  ./tools/hae_libmpv.ps1
 # Lähde: https://github.com/shinchiro/mpv-winbuild-cmake (64-bit, ei AVX2-vaatimusta)
 #
+# Lukitus: tiedostossa tools/libmpv.lock on paketin osoite ja SHA-256-summa. Kun ne on täytetty, ladataan
+# vain se paketti ja summa tarkistetaan. Näin GitHub-ajo ei koskaan ota käyttöön uutta tai muutettua
+# toistomoottoria huomaamatta. Jos lukitus on tyhjä, ladataan uusin ja tulostetaan lukitusrivit.
+#
 # GitHub vastaa joskus hetkellisesti virheellä ("Unicorn! ... couldn't respond in time"), ja tuoreen
 # julkaisun tiedostot voivat olla vielä kesken. Siksi jokaista latausta yritetään useita kertoja,
 # ja jos uusin julkaisu ei lataudu, käytetään edellisiä julkaisuja.
@@ -31,6 +35,39 @@ $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
 if (-not $sevenZip) { $sevenZip = "C:\Program Files\7-Zip\7z.exe" }
 if (-not (Test-Path $sevenZip)) { throw "7-Zip puuttuu. Asenna se osoitteesta https://www.7-zip.org/" }
 
+function Extract([string]$Archive) {
+    & $sevenZip e $Archive "libmpv-2.dll" "-o$root" -y | Out-Null
+    if (-not (Test-Path (Join-Path $root "libmpv-2.dll"))) { throw "libmpv-2.dll:n purku epäonnistui" }
+}
+
+# ---------- Lukittu paketti ----------
+$lock = @{}
+$lockFile = Join-Path $root "tools/libmpv.lock"
+if (Test-Path $lockFile) {
+    foreach ($line in Get-Content $lockFile) {
+        if ($line -match '^\s*(url|sha256)\s*=\s*(\S*)\s*$') { $lock[$Matches[1]] = $Matches[2] }
+    }
+}
+if ($lock["url"] -and $lock["sha256"]) {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetFileName($lock["url"]))
+    Retry {
+        Write-Host "Ladataan lukittu paketti $($lock["url"])..."
+        if (Test-Path $tmp) { Remove-Item $tmp -Force }
+        Invoke-WebRequest -Headers $headers $lock["url"] -OutFile $tmp
+    } "Lataus" 4
+    $actual = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+    if ($actual -ne $lock["sha256"].ToLower()) {
+        Remove-Item $tmp -Force
+        throw "libmpv-paketin tarkistussumma ei täsmää! Odotettu $($lock["sha256"]), saatiin $actual. Pakettia EI käytetty."
+    }
+    Extract $tmp
+    Remove-Item $tmp -Force
+    Write-Host "Valmis: libmpv-2.dll (lukittu paketti, SHA-256 tarkistettu)"
+    exit 0
+}
+
+# ---------- Ei lukitusta: uusin paketti ----------
+Write-Host "::warning::tools/libmpv.lock on tyhjä. Ladataan uusin libmpv. Lukitse se: kopioi ajon yhteenvedon rivit tiedostoon tools/libmpv.lock."
 $releases = Retry { Invoke-RestMethod -Headers $headers "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases?per_page=4" } "Julkaisulistan haku"
 
 foreach ($rel in $releases) {
@@ -48,10 +85,16 @@ foreach ($rel in $releases) {
             if ($LASTEXITCODE -ne 0) { throw "ladattu paketti on rikki" }
         } "Lataus ($($asset.name))" 4
 
-        & $sevenZip e $tmp "libmpv-2.dll" "-o$root" -y | Out-Null
+        $sha = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+        Extract $tmp
         Remove-Item $tmp -Force
-        if (-not (Test-Path (Join-Path $root "libmpv-2.dll"))) { throw "libmpv-2.dll:n purku epäonnistui" }
         Write-Host "Valmis: $root\libmpv-2.dll (julkaisu $($rel.tag_name))"
+        $pin = "url=$($asset.browser_download_url)`nsha256=$sha"
+        Write-Host "Lukitusrivit tiedostoon tools/libmpv.lock:`n$pin"
+        if ($env:GITHUB_STEP_SUMMARY) {
+            "### libmpv: kopioi nämä rivit tiedostoon tools/libmpv.lock`n``````n$pin`n``````" |
+                Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+        }
         exit 0
     }
     catch {

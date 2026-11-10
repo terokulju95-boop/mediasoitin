@@ -1,0 +1,5 @@
+# libmpv-2.dll:n lukitus. tools/hae_libmpv.ps1 lataa VAIN tämän paketin ja tarkistaa sen SHA-256-summan.
+# Jos rivit ovat tyhjiä, skripti lataa uusimman paketin ja tulostaa GitHub-ajon yhteenvetoon rivit,
+# jotka kopioidaan tähän. Sen jälkeen jokainen rakennus käyttää täsmälleen samaa tarkistettua pakettia.
+url=
+sha256=

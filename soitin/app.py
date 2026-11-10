@@ -38,6 +38,17 @@ NAV_KEYS = {Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp,
             Qt.Key_PageDown, Qt.Key_Home, Qt.Key_End}
 
 
+
+def _local_path(path):
+    """Kaukosäädin saa avata vain tämän koneen omia polkuja (myös asemakirjaimella liitetyt verkkolevyt).
+    Verkkopolut (\\\\palvelin\\jako, //palvelin) ja osoitteet (smb://, http://) estetään: Windows voisi
+    lähettää kirjautumistietonsa tiivisteen vieraalle palvelimelle jo pelkästä tiedoston avaamisesta."""
+    p = str(path or "").strip()
+    if not p or p.startswith(("\\\\", "//")) or "://" in p:
+        return False
+    return True
+
+
 class NavKeyFilter(QObject):
     """Kun tiedosto- tai soittolista on valittuna, nuolinäppäimet liikkuvat listassa
     eivätkä kelaa. Muualla (esim. videon päällä) ne toimivat pikanäppäiminä."""
@@ -374,7 +385,7 @@ class MainWindow(QMainWindow):
         self.next_timer = QTimer(self, interval=1000, timeout=self._next_tick)
         self.remote = RemoteServer(self)
         self.remote.command.connect(self.on_remote_command)
-        self.remote.pair_requested.connect(self._show_pair_code)
+        self.remote.pair_requested.connect(self._show_pair_request)
         self._root_items = []
         self.remote.providers = {
             "browse": self._api_browse, "library": self._api_library, "album": self._api_album,
@@ -1710,6 +1721,8 @@ class MainWindow(QMainWindow):
                 self.skip_intro()
             elif cmd == "play_path":
                 path = str(value.get("path", ""))
+                if not _local_path(path):
+                    return
                 drive = next((d for d in list_drives() if d.root == path and d.disc), None)
                 if drive:
                     self.play_disc(drive)
@@ -1718,15 +1731,21 @@ class MainWindow(QMainWindow):
                 elif Path(path).is_file():
                     self.play_file_in_context(path)
             elif cmd == "queue_path":
-                self.add_paths([str(value.get("path", ""))])
+                path = str(value.get("path", ""))
+                if not (_local_path(path) and Path(path).exists()):
+                    return
+                self.add_paths([path])
                 self.video.toast("Lisätty soittolistaan")
             elif cmd == "play_paths":
                 paths = [str(x) for x in value.get("paths", [])][:2000]
+                paths = [p for p in paths if _local_path(p) and Path(p).exists()]
                 if paths:
                     self.add_paths(paths, replace=True)
                     v.cmd("playlist-play-index", int(value.get("index", 0)))
             elif cmd == "radio_play":
-                self.play_radio(str(value.get("url", "")), str(value.get("name", "Netradio")))
+                url = str(value.get("url", ""))
+                if url.lower().startswith(("http://", "https://")):
+                    self.play_radio(url, str(value.get("name", "Netradio")))
             elif cmd == "radio_fav":
                 self.radio.toggle_favorite({"name": str(value.get("name", "")), "url": str(value.get("url", "")),
                                             "favicon": str(value.get("favicon", "")),
@@ -1751,6 +1770,8 @@ class MainWindow(QMainWindow):
     def _api_browse(self, path):
         if not path:
             return {"path": "", "title": "Tietokone", "parent": None, "items": list(self._root_items)}
+        if not _local_path(path):
+            return {"error": "Kansiota ei löytynyt."}
         p = Path(path)
         if not p.is_dir():
             return {"error": "Kansiota ei löytynyt."}
@@ -1789,10 +1810,10 @@ class MainWindow(QMainWindow):
             {"title": t.get("title") or Path(t["path"]).stem, "track": t.get("track") or "",
              "dur": fmt_time(t.get("duration")) if t.get("duration") else "", "path": t["path"]} for t in lst]}
 
-    def _show_pair_code(self, code, device):
+    def _show_pair_request(self, pid, device):
         if self.pair_dialog:
             self.pair_dialog.close()
-        self.pair_dialog = PairCodeDialog(code, device, self)
+        self.pair_dialog = PairCodeDialog(self.remote, pid, device, self)
         self.pair_dialog.show()
         self.pair_dialog.raise_()
         self.pair_dialog.activateWindow()

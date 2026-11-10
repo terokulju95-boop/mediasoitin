@@ -24,20 +24,30 @@ android {
         versionName soitinVersion
     }
 
+    // Allekirjoitusavain tulee GitHubin salaisuuksista (ANDROID_KEYSTORE_BASE64 ja ANDROID_KEYSTORE_PASSWORD).
+    // Avainta tai sen salasanaa EI saa koskaan laittaa repoon: sillä voi tehdä päivityksen, jonka puhelin hyväksyy.
+    // Kiinteä allekirjoitus: päivitykset asentuvat vanhan version päälle.
+    def keystorePath = System.getenv('ANDROID_KEYSTORE_PATH')
+    def keystorePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD')
+
     signingConfigs {
         release {
-            // Kiinteä allekirjoitus: päivitykset asentuvat vanhan version päälle.
-            storeFile rootProject.file('release.keystore')
-            storePassword 'mediasoitin'
-            keyAlias 'kaukosaadin'
-            keyPassword 'mediasoitin'
+            if (keystorePath) {
+                storeFile file(keystorePath)
+                storeType 'pkcs12'
+                storePassword keystorePassword
+                keyAlias 'kaukosaadin'
+                keyPassword keystorePassword
+            }
         }
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.release
+            if (keystorePath) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

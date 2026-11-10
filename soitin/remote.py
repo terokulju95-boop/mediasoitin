@@ -3,8 +3,15 @@
 Soitin käynnistää pienen www-palvelimen kotiverkkoon.
 - Selaimella: QR-koodin osoite (sisältää satunnaisen avaimen).
 - Android-sovelluksella: sovellus löytää soittimen itse (UDP-haku) ja muodostaa
-  laiteparin kerran 4-numeroisella koodilla. Sen jälkeen yhteys toimii aina.
+  laiteparin kerran. Sen jälkeen yhteys toimii aina.
+
+Laiteparin turvallisuus (kaukosäädin voi ohjata hiirtä ja näppäimistöä, joten tämä on tärkeää):
+- Laiteparia voi pyytää vain, kun Kaukosäädin-ikkuna on auki tietokoneella.
+- Pyyntö pitää hyväksyä tietokoneella Salli-napilla. Vasta sitten arvotaan 6-numeroinen koodi.
+- Kolme väärää koodia mitätöi pyynnön. Kymmenen väärää koodia tunnissa lukitsee pariutuksen tunniksi.
+- Pyyntöjä hyväksytään enintään kolme kymmenessä minuutissa.
 """
+import html
 import json
 import platform
 import secrets
@@ -26,6 +33,17 @@ from .remote_page import PAGE
 DISCOVERY_PORT = 41234
 DISCOVERY_MAGIC = b"MEDIASOITIN_DISCOVER"
 
+# Laiteparin rajat
+PAIR_CODE_DIGITS = 6
+PAIR_APPROVE_TIMEOUT = 120      # s: aika painaa Salli tietokoneella
+PAIR_CODE_TIMEOUT = 180         # s: koodin voimassaolo Sallin jälkeen
+PAIR_MAX_TRIES = 3              # väärää koodia / pyyntö
+PAIR_MAX_REQUESTS = 3           # pyyntöä ...
+PAIR_REQUEST_WINDOW = 600       # ... kymmenessä minuutissa
+PAIR_MAX_FAILS = 10             # väärää koodia ...
+PAIR_FAIL_WINDOW = 3600         # ... tunnissa → lukitus
+PAIR_LOCK_TIME = 3600           # s
+
 
 def local_ip():
     """Koneen osoite kotiverkossa (ei lähetä mitään verkkoon)."""
@@ -42,6 +60,7 @@ def local_ip():
 def fix_firewall():
     """Sallii Mediasoittimen Windowsin palomuurissa (kysyy järjestelmänvalvojan luvan).
     Poistaa ensin vanhat säännöt (myös mahdolliset estosäännöt) ja luo uuden sallivan säännön.
+    Sääntö koskee vain yksityisiä verkkoja (kotiverkko), ei julkisia wifejä.
     Palauttaa (onnistui, viesti)."""
     import base64
     import subprocess
@@ -54,7 +73,7 @@ def fix_firewall():
         f"Get-NetFirewallApplicationFilter -Program {q} -ErrorAction SilentlyContinue | "
         "Get-NetFirewallRule -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue; "
         f"New-NetFirewallRule -DisplayName 'Mediasoitin (kaukosäädin)' -Direction Inbound -Program {q} "
-        "-Action Allow -Profile Any | Out-Null"
+        "-Action Allow -Profile Private | Out-Null"
     )
     enc = base64.b64encode(inner.encode("utf-16-le")).decode("ascii")
     outer = ("try { $p = Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -PassThru "
@@ -67,7 +86,9 @@ def fix_firewall():
     except Exception as e:
         return False, f"Palomuurin asetusta ei voitu muuttaa: {e}"
     if r.returncode == 0:
-        return True, "Palomuuri sallii nyt Mediasoittimen. Kokeile hakua puhelimella uudelleen."
+        return True, ("Palomuuri sallii nyt Mediasoittimen kotiverkossa (yksityiset verkot). Kokeile hakua puhelimella "
+                      "uudelleen.\n\nJos puhelin ei vieläkään löydä konetta, tarkista, että kotiverkon tyyppi on "
+                      "Windowsissa Yksityinen verkko.")
     if r.returncode == 1223:
         return False, "Lupaa ei annettu. Palomuurin asetusta ei muutettu."
     return False, f"Palomuurin asetusta ei voitu muuttaa (virhekoodi {r.returncode})."
@@ -79,7 +100,7 @@ def computer_name():
 
 class RemoteServer(QObject):
     command = Signal(str, object)          # komento, arvo (käsitellään käyttöliittymäsäikeessä)
-    pair_requested = Signal(str, str)      # koodi, laitteen nimi
+    pair_requested = Signal(str, str)      # pyynnön tunniste, laitteen nimi
     pair_finished = Signal(bool, str)      # onnistui, laitteen nimi
 
     def __init__(self, parent=None):
@@ -99,7 +120,11 @@ class RemoteServer(QObject):
         self.udp = None
         self.port = None
         self.error = ""
-        self._pair = None      # {"code", "device", "expires", "tries"}
+        self._pair = None      # {"id", "device", "approved", "code", "expires", "tries"}
+        self.pairing_open = False   # True, kun Kaukosäädin-ikkuna on auki (vain silloin voi pariuttaa)
+        self._req_times = []        # laiteparipyyntöjen ajat (raja: PAIR_MAX_REQUESTS / PAIR_REQUEST_WINDOW)
+        self._fail_times = []       # väärien koodien ajat (raja: PAIR_MAX_FAILS / PAIR_FAIL_WINDOW)
+        self._locked_until = 0.0
         self.providers = {}    # sovellus asettaa: browse, library, album, radio_search
         self._lock = threading.Lock()
 
@@ -125,29 +150,80 @@ class RemoteServer(QObject):
 
     # ---------------------------------------------------------- Pariutus
     def start_pairing(self, device):
+        """Puhelin pyytää laiteparia. Palauttaa (onnistui, virheilmoitus)."""
+        device = (device or "").strip()[:40] or "Puhelin"
         with self._lock:
-            code = f"{secrets.randbelow(10000):04d}"
-            self._pair = {"code": code, "device": device[:40] or "Puhelin",
-                          "expires": time.time() + 180, "tries": 0}
-        self.pair_requested.emit(code, self._pair["device"])
+            now = time.time()
+            if not self.pairing_open:
+                return False, ("Avaa tietokoneella Mediasoittimen Kaukosäädin-ikkuna "
+                               "(valikosta tai ilmaisinalueen kuvakkeesta) ja yritä uudelleen.")
+            if now < self._locked_until:
+                return False, "Laiteparin muodostus on lukittu liian monen väärän koodin takia. Yritä myöhemmin."
+            self._req_times = [t for t in self._req_times if now - t < PAIR_REQUEST_WINDOW]
+            if len(self._req_times) >= PAIR_MAX_REQUESTS:
+                return False, "Liian monta laiteparipyyntöä. Odota hetki ja yritä uudelleen."
+            self._req_times.append(now)
+            pid = secrets.token_hex(6)
+            self._pair = {"id": pid, "device": device, "approved": False, "code": None,
+                          "expires": now + PAIR_APPROVE_TIMEOUT, "tries": 0}
+        self.pair_requested.emit(pid, device)
+        return True, ""
 
-    def confirm_pairing(self, code, device):
+    def approve_pairing(self, pid):
+        """Tietokoneen käyttäjä painoi Salli. Palauttaa puhelimeen syötettävän koodin (tai None)."""
         with self._lock:
             p = self._pair
-            if not p or time.time() > p["expires"]:
-                return None, "Pariutus on vanhentunut. Aloita uudelleen."
-            p["tries"] += 1
-            if p["tries"] > 5:
+            if not p or p["id"] != pid or time.time() > p["expires"]:
+                return None
+            p["code"] = f"{secrets.randbelow(10 ** PAIR_CODE_DIGITS):0{PAIR_CODE_DIGITS}d}"
+            p["approved"] = True
+            p["expires"] = time.time() + PAIR_CODE_TIMEOUT
+            return p["code"]
+
+    def deny_pairing(self, pid):
+        """Estä tai ikkunan sulkeminen: pyyntö mitätöidään (vain tämä pyyntö, ei myöhempää)."""
+        with self._lock:
+            if self._pair and self._pair["id"] == pid:
                 self._pair = None
-                return None, "Liian monta yritystä. Aloita uudelleen."
+
+    def confirm_pairing(self, code, device=""):
+        """Puhelin lähettää koodin. Palauttaa (avain, virheilmoitus)."""
+        failed_device = None
+        with self._lock:
+            now = time.time()
+            if now < self._locked_until:
+                return None, "Laiteparin muodostus on lukittu liian monen väärän koodin takia. Yritä myöhemmin."
+            p = self._pair
+            if not p or now > p["expires"]:
+                return None, "Pariutus on vanhentunut. Aloita uudelleen."
+            if not p["approved"]:
+                return None, "Hyväksy pyyntö ensin tietokoneella (Salli)."
             if not secrets.compare_digest(str(code).strip(), p["code"]):
-                return None, "Väärä koodi."
-            self._pair = None
+                p["tries"] += 1
+                self._fail_times = [t for t in self._fail_times if now - t < PAIR_FAIL_WINDOW] + [now]
+                if len(self._fail_times) >= PAIR_MAX_FAILS:
+                    self._locked_until = now + PAIR_LOCK_TIME
+                    self._pair = None
+                    msg = "Liian monta väärää koodia. Laiteparin muodostus on lukittu tunniksi."
+                    failed_device = p["device"]
+                elif p["tries"] >= PAIR_MAX_TRIES:
+                    self._pair = None
+                    msg = "Liian monta väärää koodia. Aloita uudelleen."
+                    failed_device = p["device"]
+                else:
+                    return None, "Väärä koodi."
+            else:
+                name = p["device"]
+                self._pair = None
+                msg = ""
+        if failed_device is not None:
+            self.pair_finished.emit(False, failed_device)
+            return None, msg
         tok = secrets.token_urlsafe(24)
         devs = self.devices()
-        devs.append({"token": tok, "name": device[:40] or "Puhelin", "added": time.strftime("%d.%m.%Y")})
+        devs.append({"token": tok, "name": name, "added": time.strftime("%d.%m.%Y")})
         self._save_devices(devs)
-        self.pair_finished.emit(True, device)
+        self.pair_finished.emit(True, name)
         return tok, ""
 
     # ---------------------------------------------------------- Palvelin
@@ -240,8 +316,8 @@ class RemoteServer(QObject):
                     self._send(400, {})
                     return
                 if u.path == "/api/pair/request":
-                    owner.start_pairing(str(data.get("device", "")))
-                    self._send(200, {"ok": True})
+                    ok, err = owner.start_pairing(str(data.get("device", "")))
+                    self._send(200 if ok else 403, {"ok": True} if ok else {"error": err})
                     return
                 if u.path == "/api/pair/confirm":
                     tok, err = owner.confirm_pairing(data.get("code", ""), str(data.get("device", "")))
@@ -333,28 +409,59 @@ def qr_pixmap(text, size=260):
 
 
 class PairCodeDialog(QDialog):
-    """Näytetään, kun puhelin pyytää laiteparia."""
+    """Näytetään, kun puhelin pyytää laiteparia: ensin Salli / Estä, sitten koodi."""
 
-    def __init__(self, code, device, parent=None):
+    def __init__(self, server, pid, device, parent=None):
         super().__init__(parent)
+        self.server = server
+        self.pid = pid
         self.setWindowTitle("Laitepari")
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         lay = QVBoxLayout(self)
-        t = QLabel(f"<b>{device}</b> haluaa ohjata soitinta.<br>Syötä puhelimeen tämä koodi:")
-        t.setAlignment(Qt.AlignCenter)
-        c = QLabel(" ".join(code))
-        c.setAlignment(Qt.AlignCenter)
-        c.setStyleSheet("font-size: 44pt; font-weight: bold; letter-spacing: 6px; padding: 10px 24px;")
-        n = QLabel("Koodi on voimassa 3 minuuttia. Jos et tunnista laitetta, sulje tämä ikkuna.")
-        n.setObjectName("pathLabel")
-        n.setWordWrap(True)
-        close = QPushButton("Sulje")
-        close.clicked.connect(self.close)
-        lay.addWidget(t)
-        lay.addWidget(c)
-        lay.addWidget(n)
-        lay.addWidget(close, 0, Qt.AlignRight)
-        self.setMinimumWidth(380)
+        self.title = QLabel(f"<b>{html.escape(device)}</b> haluaa ohjata tätä tietokonetta.")
+        self.title.setTextFormat(Qt.RichText)
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setWordWrap(True)
+        self.info = QLabel("Kaukosäädin voi ohjata soitinta sekä tietokoneen hiirtä ja näppäimistöä.\n"
+                           "Salli vain, jos aloitit laiteparin itse omalla puhelimellasi.")
+        self.info.setAlignment(Qt.AlignCenter)
+        self.info.setWordWrap(True)
+        self.code = QLabel()
+        self.code.setAlignment(Qt.AlignCenter)
+        self.code.setStyleSheet("font-size: 40pt; font-weight: bold; letter-spacing: 6px; padding: 10px 24px;")
+        self.code.hide()
+        self.deny_btn = QPushButton("Estä")
+        self.deny_btn.clicked.connect(self.close)
+        self.allow_btn = QPushButton("Salli")
+        self.allow_btn.setDefault(False)
+        self.allow_btn.setAutoDefault(False)
+        self.allow_btn.clicked.connect(self._allow)
+        btns = QHBoxLayout()
+        btns.addStretch()
+        btns.addWidget(self.deny_btn)
+        btns.addWidget(self.allow_btn)
+        for w in (self.title, self.info, self.code):
+            lay.addWidget(w)
+        lay.addLayout(btns)
+        self.setMinimumWidth(420)
+
+    def _allow(self):
+        code = self.server.approve_pairing(self.pid)
+        if code is None:
+            self.info.setText("Pyyntö ehti vanhentua. Aloita laitepari puhelimesta uudelleen.")
+            self.allow_btn.hide()
+            self.deny_btn.setText("Sulje")
+            return
+        self.code.setText(" ".join([code[:3], code[3:]]))
+        self.code.show()
+        self.info.setText("Syötä tämä koodi puhelimeen. Koodi on voimassa 3 minuuttia.")
+        self.allow_btn.hide()
+        self.deny_btn.setText("Peru")
+
+    def closeEvent(self, e):
+        # Ikkunan sulkeminen (Estä, Peru, rasti) mitätöi juuri tämän pyynnön.
+        self.server.deny_pairing(self.pid)
+        super().closeEvent(e)
 
 
 class RemoteDialog(QDialog):
@@ -409,6 +516,14 @@ class RemoteDialog(QDialog):
         server.pair_finished.connect(lambda *_: self._refresh())
         self._refresh()
 
+    def showEvent(self, e):
+        self.server.pairing_open = True
+        super().showEvent(e)
+
+    def hideEvent(self, e):
+        self.server.pairing_open = False
+        super().hideEvent(e)
+
     def _toggle(self, on):
         if on:
             ok = self.server.start(self.cfg.get("remote_port"))
@@ -459,8 +574,10 @@ class RemoteDialog(QDialog):
                 + ("" if ok_udp else "<br><span style='color:#ffb74d'>Automaattinen haku ei ole käytössä "
                    "(portti 41234 varattu – onko soitin auki kahdesti?). Kirjoita osoite puhelimeen käsin.</span>"))
             self.app_info.setText(
-                "<b>Android-sovellus:</b> avaa Mediasoitin-kaukosäädin puhelimessa, niin se löytää tämän "
-                "koneen itse. Ensimmäisellä kerralla tähän ruutuun tulee koodi, jonka syötät puhelimeen.")
+                "<b>Android-sovellus:</b> pidä tämä ikkuna auki ja avaa Mediasoitin-kaukosäädin puhelimessa, "
+                "niin se löytää tämän koneen itse. Uutta laiteparia muodostettaessa tähän ruutuun tulee pyyntö: "
+                "paina <i>Salli</i> ja syötä puhelimeen näkyviin tuleva koodi. Laiteparia voi muodostaa vain, "
+                "kun tämä ikkuna on auki.")
             url = self.server.url()
             pm = qr_pixmap(url)
             if pm:

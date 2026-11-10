@@ -176,7 +176,7 @@ class MainActivity : Activity() {
         e.setPadding(dp(14), dp(12), dp(14), dp(12))
         if (numeric) {
             e.inputType = InputType.TYPE_CLASS_NUMBER
-            e.filters = arrayOf(InputFilter.LengthFilter(4))
+            e.filters = arrayOf(InputFilter.LengthFilter(6))
             e.gravity = Gravity.CENTER
             e.letterSpacing = 0.4f
         } else {
@@ -287,8 +287,13 @@ class MainActivity : Activity() {
         bg.execute {
             val r = Api.request("${Api.base(pc.host, pc.port)}/api/pair/request", "POST",
                 JSONObject().put("device", deviceName()))
+            val err = r.json()?.optString("error")?.ifEmpty { null }
             ui.post {
-                if (r.code == 200) askCode(pc) else showSetup("Tietokone ei vastannut. Yritä uudelleen.")
+                when {
+                    r.code == 200 -> askCode(pc)
+                    err != null -> showSetup(err)
+                    else -> showSetup("Tietokone ei vastannut. Yritä uudelleen.")
+                }
             }
         }
     }
@@ -296,9 +301,10 @@ class MainActivity : Activity() {
     private fun askCode(pc: Pc, error: String? = null) {
         page { col ->
             col.addView(label("Laitepari: ${pc.name}", 18f, text, true).also { it.setPadding(0, dp(18), 0, dp(4)) })
-            col.addView(label("Tietokoneen ruudulle tuli 4-numeroinen koodi. Kirjoita se tähän.", 15f, muted))
+            col.addView(label("Tietokoneen ruudulle tuli laiteparipyyntö. Paina siellä Salli ja kirjoita " +
+                "näkyviin tuleva 6-numeroinen koodi tähän.", 15f, muted))
             if (error != null) col.addView(label(error, 15f, Color.parseColor("#FFB74D")))
-            val code = input("0000", numeric = true)
+            val code = input("000000", numeric = true)
             col.addView(code)
             val go = button("Yhdistä", primary = true) { confirm(pc, code.text.toString()) }
             col.addView(go)
@@ -313,11 +319,15 @@ class MainActivity : Activity() {
     }
 
     private fun confirm(pc: Pc, code: String) {
-        if (code.length != 4) return
+        val clean = code.filter { it.isDigit() }
+        if (clean.length != 6) {
+            askCode(pc, "Koodissa on 6 numeroa.")
+            return
+        }
         showStatus("Yhdistetään…")
         bg.execute {
             val r = Api.request("${Api.base(pc.host, pc.port)}/api/pair/confirm", "POST",
-                JSONObject().put("code", code).put("device", deviceName()))
+                JSONObject().put("code", clean).put("device", deviceName()))
             val o = r.json()
             ui.post {
                 val token = o?.optString("token") ?: ""
@@ -328,6 +338,8 @@ class MainActivity : Activity() {
                     openRemote(real)
                 } else if (o?.optString("error")?.contains("Väärä") == true) {
                     askCode(pc, "Väärä koodi. Tarkista tietokoneen ruudulta.")
+                } else if (o?.optString("error")?.contains("Hyväksy") == true) {
+                    askCode(pc, "Paina ensin tietokoneella Salli. Kirjoita sitten ruudulle tuleva koodi.")
                 } else {
                     showSetup(o?.optString("error")?.ifEmpty { null } ?: "Laitepari epäonnistui.")
                 }
